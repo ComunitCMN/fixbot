@@ -142,9 +142,10 @@ async def deploy(*, clients_dir: str, slug: str, env_text: str,
     except OSError as e:
         raise ProvisionError(f"не смог создать папку: {e}") from e
 
-    report = {"folder": str(folder), "started": False, "log": ""}
+    report = {"folder": str(folder), "started": False, "log": "",
+              "systemd": has_systemd()}
 
-    if not has_systemd():
+    if not report["systemd"]:
         report["log"] = ("systemd не найден — вероятно это не сервер. "
                          "Настройки созданы, службу запустите вручную.")
         return report
@@ -170,6 +171,14 @@ def deploy_report(slug: str, report: dict, bot_handle: str | None) -> str:
              f"Папка: <code>{report['folder']}</code>"]
     if report["started"]:
         lines.append(f"Служба: <code>fixbot@{slug}</code> — работает")
+    elif not report.get("systemd", True):
+        # На маке служб нет, и советовать systemctl бессмысленно: команда
+        # просто не найдётся. Подсказываем то, что там действительно работает.
+        lines += ["Запустить осталось вручную — в <b>новом</b> окне "
+                  "Терминала (<code>Cmd+N</code>):", "",
+                  f"<code>cd ~/Desktop/fixbot && ./run-client.sh {slug}</code>",
+                  "", "Окно нужно держать открытым: это и есть работающий "
+                  "бот. Остановить — <code>Ctrl+C</code>."]
     else:
         lines += ["Служба: ❗️ не запустилась",
                   f"<i>{report['log'][:300]}</i>", "",

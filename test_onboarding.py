@@ -249,9 +249,21 @@ async def test_deploy_without_systemd_is_not_a_failure(tmp_path, monkeypatch):
 def test_deploy_report_explains_manual_start():
     out = pv.deploy_report("romashka", {
         "folder": "/opt/fixbot/clients/romashka", "started": False,
-        "log": "unit not found"}, "@romashka_bot")
+        "systemd": True, "log": "unit not found"}, "@romashka_bot")
     assert "не запустилась" in out
     assert "systemctl enable --now fixbot@romashka" in out
+
+
+def test_deploy_report_on_mac_suggests_the_script_not_systemctl():
+    """
+    Совет «sudo systemctl» на маке — тупик: такой команды там нет.
+    Подсказывать надо то, что действительно запустится.
+    """
+    out = pv.deploy_report("romashka", {
+        "folder": "/Users/t/Desktop/clients/romashka", "started": False,
+        "systemd": False, "log": "systemd не найден"}, "@romashka_bot")
+    assert "run-client.sh romashka" in out
+    assert "systemctl" not in out
 
 
 def test_deploy_report_success():

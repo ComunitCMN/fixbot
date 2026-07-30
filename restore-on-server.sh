@@ -34,7 +34,25 @@ fi
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-tar -xzf "$ARCHIVE" -C "$TMP"
+
+case "$ARCHIVE" in
+    *.enc)
+        # Ежедневные копии зашифрованы: внутри телефоны клиентов и токены
+        # к чужим CRM. Пароль лежит в менеджере паролей, не на сервере.
+        if [ -z "${BACKUP_PASSPHRASE:-}" ]; then
+            read -r -s -p "Пароль от копии: " BACKUP_PASSPHRASE; echo
+            export BACKUP_PASSPHRASE
+        fi
+        openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+            -in "$ARCHIVE" -pass env:BACKUP_PASSPHRASE 2>/dev/null \
+            | tar -xzf - -C "$TMP" \
+            || { echo "Не открылось. Неверный пароль или файл повреждён."; exit 1; }
+        ;;
+    *)
+        tar -xzf "$ARCHIVE" -C "$TMP"
+        ;;
+esac
+
 ROOT=$(find "$TMP" -maxdepth 1 -mindepth 1 -type d | head -1)
 
 # Переписывает путь в настройках: ключ, новое значение, файл.

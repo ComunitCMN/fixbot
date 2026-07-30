@@ -7,7 +7,15 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
-load_dotenv()
+#: Какой файл настроек читать.
+#:
+#: По умолчанию python-dotenv ищет `.env` от текущей папки и вверх. Для
+#: одиночного бота это удобно, но у оператора код общий, а настройки
+#: клиентов лежат по своим папкам: запуская клиента из папки с кодом, бот
+#: находил `.env` оператора и подмешивал оттуда всё, чего не было
+#: у клиента. Поэтому путь передаётся явно.
+_ENV_FILE = os.getenv("ENV_FILE", "").strip()
+load_dotenv(_ENV_FILE or None)
 
 
 def _int(name: str) -> int | None:

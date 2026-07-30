@@ -48,15 +48,11 @@ echo
 trap 'echo; echo "Останавливаю…"; exit 0' INT TERM
 
 while true; do
-    # set -a превращает переменные из файла в переменные окружения,
-    # source понимает кавычки — поэтому названия с пробелами не ломаются.
+    # ENV_FILE говорит боту, чей именно .env читать. Без этого он взял бы
+    # файл оператора — он лежит рядом с кодом, откуда бот и запускается.
     (
-        set -a
-        # shellcheck disable=SC1090
-        source "$DIR/.env"
-        set +a
         cd "$APP"
-        exec python3 bot.py
+        exec env ENV_FILE="$DIR/.env" python3 bot.py
     ) 2>&1 | tee -a "$DIR/bot.log"
 
     echo "$(date '+%H:%M:%S') — бот остановился, перезапуск через 5 сек"

@@ -1,6 +1,10 @@
 """Помощник подключения нового клиента и разворачивание."""
 
+import os
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -272,6 +276,56 @@ def test_deploy_report_success():
         "log": "active"}, "@romashka_bot")
     assert "работает" in out
     assert "@romashka_bot" in out
+
+
+# ===================== чей .env читаем =====================
+
+REPO = Path(__file__).parent
+
+
+def test_client_bot_ignores_operator_env(tmp_path):
+    """
+    Код общий, а настройки у каждого свои. Запускаясь из папки с кодом,
+    бот находил рядом .env оператора и подмешивал оттуда всё, чего
+    не было у клиента, — вплоть до чужого списка клиентов.
+    """
+    work = tmp_path / "code"
+    work.mkdir()
+    (work / ".env").write_text(
+        'TELEGRAM_TOKEN="оператор"\nANTHROPIC_API_KEY="k"\n'
+        'AMO_SUBDOMAIN="operator"\nAMO_LONG_TOKEN="t"\n'
+        'CLIENTS_DIR="/чужая/папка"\nDEVELOPER_NAME="Оператор"\n',
+        encoding="utf-8")
+
+    client = tmp_path / "client"
+    client.mkdir()
+    (client / ".env").write_text(
+        'TELEGRAM_TOKEN="клиент"\nANTHROPIC_API_KEY="k"\n'
+        'AMO_SUBDOMAIN="client"\nAMO_LONG_TOKEN="t"\n'
+        'DEVELOPER_NAME="Eco Invest Group"\n', encoding="utf-8")
+
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("TELEGRAM_", "AMO_", "ANTHROPIC_",
+                                "CLIENTS_", "DEVELOPER_", "DB_", "OPERATOR_"))}
+    env["PYTHONPATH"] = str(REPO)
+    env["ENV_FILE"] = str(client / ".env")
+
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from config import Config; c = Config();"
+         " print(c.developer_name, '|', c.clients_dir, '|', c.telegram_token)"],
+        cwd=work, env=env, capture_output=True, text=True, timeout=60)
+
+    assert out.returncode == 0, out.stderr
+    assert "Eco Invest Group" in out.stdout       # взял настройки клиента
+    assert "чужая" not in out.stdout              # и ничего не подтянул
+    assert "оператор" not in out.stdout
+
+
+def test_runner_passes_env_file():
+    """Иначе клиентский бот молча заработает на настройках оператора."""
+    script = (REPO / "run-client.sh").read_text(encoding="utf-8")
+    assert 'ENV_FILE="$DIR/.env"' in script
 
 
 # ===================== тексты =====================

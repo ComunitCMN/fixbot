@@ -48,9 +48,15 @@ def test_unknown_invite(tmp_path):
 
 
 def test_code_is_unguessable():
-    codes = {onb.new_code() for _ in range(200)}
-    assert len(codes) == 200
-    assert all(c.isalnum() and len(c) >= 6 for c in codes)
+    codes = {onb.new_code() for _ in range(500)}
+    assert len(codes) == 500                    # совпадений быть не должно
+    assert all(c.isalnum() and len(c) == 8 for c in codes)
+
+
+def test_code_avoids_lookalike_characters():
+    """Код иногда переписывают руками — ноль и «O» путать не надо."""
+    all_chars = set("".join(onb.new_code() for _ in range(300)))
+    assert not (all_chars & set("0O1lI"))
 
 
 # ===================== состояние помощника =====================
@@ -146,11 +152,28 @@ def test_render_env_contains_everything():
         inherited={"ANTHROPIC_API_KEY": "sk-ant-x", "DEFAULT_LANG": "ru"},
         stamp="01.09.2026")
 
-    for part in ("TELEGRAM_TOKEN=123:ABC", "AMO_SUBDOMAIN=romashka",
-                 "AMO_LONG_TOKEN=eyJ0", "DEVELOPER_NAME=Ромашка",
+    for part in ('TELEGRAM_TOKEN="123:ABC"', 'AMO_SUBDOMAIN="romashka"',
+                 'AMO_LONG_TOKEN="eyJ0"', 'DEVELOPER_NAME="Ромашка"',
                  "OPERATOR_IDS=1,2", "OWNER_IDS=42",
-                 "ANTHROPIC_API_KEY=sk-ant-x", "DEFAULT_LANG=ru"):
+                 'ANTHROPIC_API_KEY="sk-ant-x"', 'DEFAULT_LANG="ru"'):
         assert part in text
+
+
+def test_render_env_quotes_values_with_spaces():
+    """
+    «Eco Invest Group» без кавычек ломает загрузку настроек: оболочка
+    попытается выполнить «Invest» как команду.
+    """
+    text = pv.render_env(
+        developer="Eco Invest Group", bot_token="1:A", subdomain="eco",
+        amo_token="t", operator_ids={1}, owner_ids={2}, db_path="/a b/y.db")
+    assert 'DEVELOPER_NAME="Eco Invest Group"' in text
+    assert 'DB_PATH="/a b/y.db"' in text
+
+
+def test_quote_escapes_dangerous_characters():
+    assert pv.quote('он сказал "да"') == '"он сказал \\"да\\""'
+    assert pv.quote(None) == '""'
 
 
 def test_render_env_starts_in_observation_mode():

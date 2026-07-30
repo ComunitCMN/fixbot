@@ -46,7 +46,7 @@ INHERITED = (
     "DEFAULT_REGION", "DEFAULT_LANG", "QUIET", "SHOW_CRM_LINKS",
 )
 
-ENV_TEMPLATE = """# {developer} — создано помощником подключения {stamp}
+ENV_TEMPLATE = """# Создано помощником подключения {stamp}
 
 TELEGRAM_TOKEN={bot_token}
 AMO_SUBDOMAIN={subdomain}
@@ -68,18 +68,30 @@ DRY_RUN=1
 """
 
 
+def quote(value: str) -> str:
+    """
+    Заключает значение в кавычки.
+
+    Названия компаний бывают с пробелами — «Eco Invest Group». Без кавычек
+    такая строка ломает загрузку настроек: оболочка попытается выполнить
+    «Invest» как команду. Кавычки понимают и python-dotenv, и systemd.
+    """
+    s = str(value or "")
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def render_env(*, developer: str, bot_token: str, subdomain: str,
                amo_token: str, operator_ids: set[int] | list[int],
                owner_ids: set[int] | list[int], db_path: str,
                inherited: dict[str, str] | None = None,
                stamp: str = "") -> str:
-    lines = [f"{k}={v}" for k, v in (inherited or {}).items() if v != ""]
+    lines = [f"{k}={quote(v)}" for k, v in (inherited or {}).items() if v != ""]
     return ENV_TEMPLATE.format(
-        developer=developer, stamp=stamp, bot_token=bot_token,
-        subdomain=subdomain, amo_token=amo_token,
+        developer=quote(developer), stamp=stamp, bot_token=quote(bot_token),
+        subdomain=quote(subdomain), amo_token=quote(amo_token),
         operator_ids=",".join(str(x) for x in sorted(operator_ids)),
         owner_ids=",".join(str(x) for x in sorted(owner_ids)),
-        db_path=db_path, inherited="\n".join(lines),
+        db_path=quote(db_path), inherited="\n".join(lines),
     )
 
 

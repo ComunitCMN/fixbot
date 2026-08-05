@@ -19,6 +19,7 @@ FixBot — фиксация клиентов из Telegram в amoCRM.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import os
 import time
@@ -33,9 +34,13 @@ from aiogram.types import (CallbackQuery, ChatMemberUpdated, ForceReply,
                            KeyboardButton, Message, ReplyKeyboardMarkup,
                            ReplyKeyboardRemove)
 
+import httpx
 import phonenumbers as pn
 
 import agencies as ag
+import billing as bl
+import billing_run as blrun
+import billing_ui as blui
 import broadcast as bc
 import clients as cl
 import menu as mn
@@ -1440,6 +1445,12 @@ async def on_private_any(m: Message) -> None:
         return
     if await try_onboarding_step(m):
         return
+    # Реквизиты — раньше рассылки: оператор может быть в обоих режимах
+    # сразу, и адрес кошелька не должен уехать агентствам.
+    if await try_wallet_reply(m):
+        return
+    if await try_billing_start_reply(m):
+        return
     if await try_add_staff(m):
         return
     if await try_capture_broadcast(m):
@@ -1997,9 +2008,19 @@ async def cb_menu(c: CallbackQuery) -> None:
         if not found:
             await show("Клиент не найден.", mn.back_kb())
         else:
-            await show(cl.client_text(found[0]), mn.back_kb(
-                [[InlineKeyboardButton(text="← Все клиенты",
-                                       callback_data="m:clients")]]))
+            has_billing = db.get_billing(arg) is not None
+            extra = [[InlineKeyboardButton(
+                text=("💰 Оплаты" if has_billing else "💰 Завести обслуживание"),
+                callback_data=(f"bl:open:{arg}" if has_billing
+                               else f"bl:setup:{arg}"))]]
+            extra.append([InlineKeyboardButton(text="← Все клиенты",
+                                               callback_data="m:clients")])
+            await show(cl.client_text(found[0]), mn.back_kb(extra))
+
+    elif section == "billing" and role == mn.OPERATOR:
+        items = _billing_items()
+        await show(blui.overview_text(items),
+                   mn.back_kb(blui.overview_kb(items)))
 
     elif section == "tech" and role == mn.OPERATOR:
         await show("🔧 <b>Техническое</b>\n\n"
@@ -2478,6 +2499,8 @@ async def main() -> None:
     asyncio.create_task(sync_loop())
     asyncio.create_task(expire_loop())
     asyncio.create_task(status_loop())
+    if is_operator_bot():
+        asyncio.create_task(billing_loop())
     try:
         await dp.start_polling(bot)
     finally:
@@ -2487,3 +2510,282 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+# ==========================================================================
+# Обслуживание клиентов
+#
+# Живёт только в боте оператора. Клиентские боты этого кода не касаются:
+# у них нет ни папки клиентов, ни таблиц биллинга.
+# ==========================================================================
+
+BILLING_CHECK_MIN = 60
+
+
+def is_operator_bot() -> bool:
+    """
+    Этот бот — операторский? Признак — заданная папка клиентов.
+
+    У клиентских ботов её нет, и ежедневная проверка у них не запускается:
+    иначе каждый бот принялся бы считать чужие деньги.
+    """
+    return bool(cfg.clients_dir)
+
+
+async def send_as_client_bot(slug: str, folder, text: str,
+                             photo: str | None = None) -> None:
+    """
+    Пишет владельцу от имени **его** бота.
+
+    Не от операторского: застройщик знает своего бота, и сообщение про
+    деньги от постороннего выглядит как мошенничество. Токен берём
+    из настроек клиента — этих ботов оператор сам и создавал.
+    """
+    env = cl.client_env(folder, ("TELEGRAM_TOKEN",))
+    token = env.get("TELEGRAM_TOKEN", "")
+    chat_id = cl.owner_of(folder)
+    if not token or not chat_id:
+        raise RuntimeError(f"{slug}: не знаю токен бота или владельца")
+
+    api = f"https://api.telegram.org/bot{token}"
+    async with httpx.AsyncClient(timeout=30) as http:
+        if photo:
+            r = await http.post(f"{api}/sendPhoto", data={
+                "chat_id": chat_id, "caption": text, "parse_mode": "HTML"})
+        else:
+            r = await http.post(f"{api}/sendMessage", data={
+                "chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                "disable_web_page_preview": "true"})
+    if r.status_code >= 400:
+        raise RuntimeError(f"{slug}: Telegram ответил {r.status_code}")
+
+
+async def notify_operator_billing(slug: str, text: str, kind: str,
+                                  extra: dict) -> None:
+    """Сообщение оператору — с кнопкой, если по нему нужно решение."""
+    kb = None
+    if kind in ("prepare", "nudge", "warn"):
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Открыть",
+                                 callback_data=f"bl:open:{slug}")]])
+    for admin_id in cfg.operator_ids:
+        try:
+            await bot.send_message(admin_id, text, reply_markup=kb)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Не смог написать оператору %s: %s", admin_id, e)
+
+
+async def billing_loop() -> None:
+    """
+    Раз в час смотрим, не пора ли что-то сделать по обслуживанию.
+
+    Раз в час, а не раз в сутки: сервер могли перезагрузить ровно в тот
+    момент, когда должна была пройти суточная проверка. Внутри всё равно
+    считается по календарным дням, поэтому лишние заходы ничего не делают.
+    """
+    await asyncio.sleep(30)
+    while True:
+        try:
+            done = await blrun.run_once(
+                db=db, clients_dir=cfg.clients_dir,
+                today=dt.date.today(),
+                to_operator=notify_operator_billing,
+                to_owner=send_as_client_bot)
+            if done:
+                log.info("Обслуживание: %s", done)
+        except Exception:  # noqa: BLE001
+            log.exception("Обслуживание: проход не удался")
+        await asyncio.sleep(BILLING_CHECK_MIN * 60)
+
+
+def _billing_period(row):
+    """Открытый период клиента: (строка периода, начало, срок)."""
+    start = dt.date.fromisoformat(row["start_date"])
+    closed = (dt.date.fromisoformat(row["closed_due"])
+              if row["closed_due"] else None)
+    begin, due = bl.open_period(start, closed)
+    period = db.period(row["slug"], due.isoformat(), begin.isoformat())
+    return period, begin, due
+
+
+def _billing_items():
+    out = []
+    for row in db.all_billing():
+        period, _, due = _billing_period(row)
+        out.append((row, period, due))
+    return out
+
+
+def _midnight(d: dt.date) -> int:
+    return int(time.mktime(d.timetuple()))
+
+
+@dp.callback_query(F.data.startswith("bl:"))
+async def cb_billing(c: CallbackQuery) -> None:
+    """Кнопки раздела «Оплаты». Только оператор — это его деньги."""
+    if not c.from_user or role_of(c.from_user.id) != mn.OPERATOR:
+        await c.answer("Недоступно", show_alert=True)
+        return
+
+    _, action, slug = (c.data.split(":", 2) + ["", ""])[:3]
+
+    if action == "setup":
+        # Обслуживания ещё нет — заводим, поэтому строки в базе и не должно
+        # быть. Всё остальное ниже работает с уже заведённым.
+        db.set_meta(f"await_start:{c.from_user.id}", slug)
+        await c.message.answer(blui.ASK_START,
+                               reply_markup=ForceReply(selective=True))
+        await c.answer()
+        return
+
+    row = db.get_billing(slug)
+    if row is None:
+        await c.answer("Обслуживание не заведено", show_alert=True)
+        return
+
+    folder = Path(cfg.clients_dir).expanduser() / slug
+    period, begin, due = _billing_period(row)
+
+    async def card(note: str = "") -> None:
+        fresh = db.get_billing(slug)
+        p2, b2, d2 = _billing_period(fresh)
+        n = cl.billable_fixations(folder, _midnight(b2), _midnight(d2))
+        text = blui.client_text(fresh, p2, b2, d2, n)
+        if note:
+            text += f"\n\n{note}"
+        try:
+            await c.message.edit_text(
+                text, reply_markup=mn.back_kb(blui.client_kb(fresh, p2)))
+        except Exception:  # noqa: BLE001
+            await c.message.answer(
+                text, reply_markup=mn.back_kb(blui.client_kb(fresh, p2)))
+
+    if action == "open":
+        await card()
+
+    elif action == "send":
+        if not row["wallet"]:
+            await c.answer("Сначала задайте реквизиты", show_alert=True)
+            return
+        n = cl.billable_fixations(folder, _midnight(begin), _midnight(due))
+        amount = bl.Plan(threshold=row["threshold"], low=row["low"],
+                         high=row["high"], currency=row["currency"]).amount(n)
+        try:
+            await send_as_client_bot(slug, folder, texts.invoice(
+                begin=begin, due=due, fixations=n, amount=amount,
+                currency=row["currency"], wallet=row["wallet"],
+                wallet_note=row["wallet_note"] or ""))
+            if row["wallet_qr"]:
+                await send_qr_as_client_bot(slug, folder, row["wallet_qr"])
+        except Exception as e:  # noqa: BLE001
+            log.exception("Счёт %s не ушёл", slug)
+            await c.answer(f"Не отправилось: {str(e)[:120]}", show_alert=True)
+            return
+        db.mark_period(slug, due.isoformat(), invoice_sent=1,
+                       fixations=n, amount=amount)
+        await card("📨 Счёт отправлен.")
+
+    elif action == "paid":
+        db.close_period(slug, due.isoformat(), paid_at=int(time.time()))
+        cl.set_paused(folder, False)
+        await card("✅ Период закрыт, приостановка снята.")
+
+    elif action == "resume":
+        db.set_paused(slug, False)
+        cl.set_paused(folder, False)
+        await card("▶️ Приостановка снята.")
+
+    elif action == "list":
+        rows = cl.fixation_rows(folder, _midnight(begin), _midnight(due))
+        await c.message.answer(
+            blui.fixations_text(rows, begin, due),
+            reply_markup=mn.back_kb([[InlineKeyboardButton(
+                text="← Клиент", callback_data=f"bl:open:{slug}")]]))
+
+    elif action == "wallet":
+        db.set_meta(f"await_wallet:{c.from_user.id}", slug)
+        await c.message.answer(blui.ASK_WALLET,
+                               reply_markup=ForceReply(selective=True))
+
+    await c.answer()
+
+
+async def send_qr_as_client_bot(slug: str, folder, file_id: str) -> None:
+    """
+    Пересылает картинку с QR ботом клиента.
+
+    Картинка лежит в Telegram под file_id, выданным операторскому боту,
+    а чужой бот по нему её не заберёт. Поэтому скачиваем и отправляем
+    заново — иначе клиент получил бы счёт без QR и молча.
+    """
+    env = cl.client_env(folder, ("TELEGRAM_TOKEN",))
+    token, chat_id = env.get("TELEGRAM_TOKEN", ""), cl.owner_of(folder)
+    if not token or not chat_id:
+        return
+    buf = await bot.download(file_id)
+    data = buf.read() if hasattr(buf, "read") else buf
+    async with httpx.AsyncClient(timeout=60) as http:
+        await http.post(
+            f"https://api.telegram.org/bot{token}/sendPhoto",
+            data={"chat_id": chat_id, "caption": "QR для оплаты"},
+            files={"photo": ("qr.jpg", data, "image/jpeg")})
+
+
+async def try_wallet_reply(m: Message) -> bool:
+    """Оператор прислал реквизиты или QR в ответ на просьбу."""
+    if not m.from_user:
+        return False
+    slug = db.get_meta(f"await_wallet:{m.from_user.id}")
+    if not slug or not db.get_billing(slug):
+        return False
+
+    if m.photo:
+        db.set_wallet(slug, db.get_billing(slug)["wallet"] or "",
+                      db.get_billing(slug)["wallet_note"] or "",
+                      qr=m.photo[-1].file_id)
+        await m.reply("✅ QR сохранён.")
+        return True
+
+    wallet, note = blui.parse_wallet(m.text or "")
+    if not wallet:
+        return False
+    db.set_wallet(slug, wallet, note)
+    db.set_meta(f"await_wallet:{m.from_user.id}", "")
+    await m.reply(
+        f"✅ Реквизиты сохранены для <b>{texts.esc(slug)}</b>.\n\n"
+        f"<code>{texts.esc(wallet)}</code>"
+        + (f"\n{texts.esc(note)}" if note else "")
+        + "\n\nМожно прислать QR картинкой — уйдёт вместе со счётом.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="← Клиент",
+                                 callback_data=f"bl:open:{slug}")]]))
+    return True
+
+
+async def try_billing_start_reply(m: Message) -> bool:
+    """Оператор прислал дату начала обслуживания."""
+    if not m.from_user or not (m.text or "").strip():
+        return False
+    slug = db.get_meta(f"await_start:{m.from_user.id}")
+    if not slug:
+        return False
+
+    try:
+        start = dt.date.fromisoformat((m.text or "").strip())
+    except ValueError:
+        await m.reply("Не разобрал дату. Нужен вид <code>2026-10-05</code>.")
+        return True
+
+    db.set_billing(slug, start_date=start.isoformat())
+    db.set_meta(f"await_start:{m.from_user.id}", "")
+    _, due = bl.open_period(start)
+    await m.reply(
+        f"✅ Обслуживание <b>{texts.esc(slug)}</b> с "
+        f"{texts.human_date(start)}.\n"
+        f"Первый счёт — к {texts.human_date(due)}.\n\n"
+        f"Условия по умолчанию: до 100 фиксаций $40, от 100 — $70. "
+        f"Осталось задать реквизиты.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="💳 Задать реквизиты",
+                                 callback_data=f"bl:wallet:{slug}")]]))
+    return True

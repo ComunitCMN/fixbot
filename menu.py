@@ -47,6 +47,8 @@ def main_menu(role: str) -> InlineKeyboardMarkup:
     if role == OPERATOR:
         rows.append([InlineKeyboardButton(text="🗂 Мои клиенты",
                                           callback_data="m:clients")])
+        rows.append([InlineKeyboardButton(text="💰 Оплаты",
+                                          callback_data="m:billing")])
         rows.append([InlineKeyboardButton(text="🔧 Техническое",
                                           callback_data="m:tech")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

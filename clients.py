@@ -305,3 +305,33 @@ def owner_of(folder: Path) -> int | None:
         if part.lstrip("-").isdigit():
             return int(part)
     return None
+
+
+def fixation_rows(folder: Path, since: int, until: int, limit: int = 200
+                  ) -> list[dict]:
+    """
+    Сами фиксации за период — для ответа на «а почему такая сумма».
+
+    Возвращаем только то, что нужно показать: дату, имя клиента и
+    агентство. Телефоны наружу не тащим, они здесь ни к чему.
+    """
+    db_path = folder / "fixbot.db"
+    if not db_path.exists():
+        return []
+    try:
+        conn = _open_ro(db_path)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT f.created_at, f.client_name, a.name AS agency"
+            "  FROM fixations f LEFT JOIN agencies a ON a.id = f.agency_id"
+            " WHERE f.amo_lead_id IS NOT NULL"
+            "   AND f.created_at >= ? AND f.created_at < ?"
+            " ORDER BY f.created_at DESC LIMIT ?",
+            (since, until, limit)).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()

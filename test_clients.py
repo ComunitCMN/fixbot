@@ -173,3 +173,67 @@ def test_read_only_does_not_write(tmp_path):
 
     cl.scan(tmp_path)
     assert db_file.stat().st_mtime == before
+
+
+import sqlite3, time
+from pathlib import Path
+
+import clients as cl
+
+DAY = 86400
+
+
+def _make(tmp_path, rows):
+    folder = tmp_path / "eco"; folder.mkdir()
+    c = sqlite3.connect(folder / "fixbot.db")
+    c.execute("CREATE TABLE fixations (id INTEGER PRIMARY KEY,"
+              " amo_lead_id INTEGER, created_at INTEGER)")
+    c.executemany("INSERT INTO fixations (amo_lead_id, created_at) VALUES (?,?)", rows)
+    c.commit(); c.close()
+    return folder
+
+
+def test_only_fixations_written_to_crm_are_billed(tmp_path):
+    """Проверки без подтверждения агентом клиент оплачивать не должен."""
+    now = int(time.time())
+    folder = _make(tmp_path, [
+        (555, now - DAY), (556, now - 2 * DAY),   # попали в CRM
+        (None, now - DAY), (None, now - DAY),     # только проверка
+    ])
+    assert cl.billable_fixations(folder, now - 30 * DAY, now + 1) == 2
+
+
+def test_period_bounds_are_respected(tmp_path):
+    now = int(time.time())
+    folder = _make(tmp_path, [(1, now - 40 * DAY), (2, now - 5 * DAY)])
+    assert cl.billable_fixations(folder, now - 30 * DAY, now + 1) == 1
+
+
+def test_upper_bound_is_exclusive(tmp_path):
+    """Иначе фиксация на границе попадёт в оба месяца и её оплатят дважды."""
+    now = int(time.time())
+    folder = _make(tmp_path, [(1, now)])
+    assert cl.billable_fixations(folder, now - DAY, now) == 0
+    assert cl.billable_fixations(folder, now - DAY, now + 1) == 1
+
+
+def test_missing_database_is_not_a_crash(tmp_path):
+    empty = tmp_path / "new"; empty.mkdir()
+    assert cl.billable_fixations(empty, 0, 2 ** 31) == 0
+
+
+def test_pause_marker_round_trip(tmp_path):
+    folder = tmp_path / "eco"; folder.mkdir()
+    assert not cl.is_paused(folder)
+    cl.set_paused(folder, True, "не оплачено")
+    assert cl.is_paused(folder)
+    assert "не оплачено" in (folder / "PAUSED").read_text(encoding="utf-8")
+    cl.set_paused(folder, False)
+    assert not cl.is_paused(folder)
+
+
+def test_unpausing_twice_is_harmless(tmp_path):
+    folder = tmp_path / "eco"; folder.mkdir()
+    cl.set_paused(folder, False)
+    cl.set_paused(folder, False)
+    assert not cl.is_paused(folder)

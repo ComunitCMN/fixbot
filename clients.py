@@ -222,3 +222,86 @@ def client_text(c: ClientInfo) -> str:
         "",
         f"Последняя синхронизация: {when(c.last_sync)}",
     ])
+
+
+# ===================== для расчёта обслуживания =====================
+#
+# Считаем в чужой базе, но строго на чтение. Оператор ведёт биллинг
+# у себя, а сюда заглядывает только за цифрой.
+
+PAUSE_MARKER = "PAUSED"
+
+
+def billable_fixations(folder: Path, since: int, until: int) -> int:
+    """
+    Сколько фиксаций попало в CRM за период [since, until).
+
+    Считаются только те, где создалась сделка: `amo_lead_id` заполняется
+    после нажатия кнопки агентом и успешной записи. Проверки без
+    подтверждения и отказы в счёт не идут — так у клиента есть чем
+    сверить цифру в своей же amoCRM.
+    """
+    db_path = folder / "fixbot.db"
+    if not db_path.exists():
+        return 0
+    try:
+        conn = _open_ro(db_path)
+    except sqlite3.Error:
+        return 0
+    try:
+        return _count(
+            conn,
+            "SELECT COUNT(*) FROM fixations"
+            " WHERE amo_lead_id IS NOT NULL AND created_at >= ? "
+            "   AND created_at < ?",
+            (since, until))
+    finally:
+        conn.close()
+
+
+def is_paused(folder: Path) -> bool:
+    return (folder / PAUSE_MARKER).exists()
+
+
+def set_paused(folder: Path, paused: bool, reason: str = "") -> None:
+    """
+    Ставит или снимает метку приостановки.
+
+    Метка — файл, а не запись в базе клиента: базу пишет его собственный
+    процесс, и лезть туда вторым писателем незачем. Файл же виден и
+    боту, и человеку в консоли — сразу понятно, что происходит.
+    """
+    marker = folder / PAUSE_MARKER
+    if paused:
+        marker.write_text(reason or "приостановлено оператором\n",
+                          encoding="utf-8")
+    elif marker.exists():
+        marker.unlink()
+
+
+def client_env(folder: Path, keys: tuple[str, ...]) -> dict[str, str]:
+    """
+    Читает из `.env` клиента только названные ключи.
+
+    Именно названные: в файле лежат токены amoCRM и Claude, и поднимать
+    в память весь файл ради одного значения незачем. Что попросили —
+    то и вернём.
+    """
+    out: dict[str, str] = {}
+    try:
+        for line in (folder / ".env").read_text(encoding="utf-8").splitlines():
+            m = re.match(r"\s*([A-Z_]+)\s*=\s*(.*)", line)
+            if m and m.group(1) in keys:
+                out[m.group(1)] = m.group(2).strip().strip('"\'')
+    except OSError:
+        pass
+    return out
+
+
+def owner_of(folder: Path) -> int | None:
+    """Первый Telegram-ID владельца — тот, с кем говорят про оплату."""
+    raw = client_env(folder, ("OWNER_IDS",)).get("OWNER_IDS", "")
+    for part in raw.replace(" ", "").split(","):
+        if part.lstrip("-").isdigit():
+            return int(part)
+    return None

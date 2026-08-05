@@ -106,6 +106,22 @@ def parse_phone(raw: str | None, chat_id: int | None) -> phones.Phone | None:
     return phones.normalize(raw, chat_region(chat_id)) if raw else None
 
 
+def service_paused() -> bool:
+    """
+    Приостановлено ли обслуживание.
+
+    Метку ставит бот оператора — файлом `PAUSED` рядом с базой клиента.
+    Не записью в базе: базу пишет этот процесс, и второй писатель ей
+    не нужен. Файл читается на каждую фиксацию, но это одна проверка
+    существования — дешевле, чем запрос к диску за строкой.
+    """
+    from pathlib import Path
+    try:
+        return (Path(cfg.db_path).resolve().parent / "PAUSED").exists()
+    except OSError:
+        return False
+
+
 def chat_lang(chat_id: int | None, text: str = "") -> str:
     """
     Язык ответа.
@@ -573,6 +589,13 @@ async def on_message(m: Message) -> None:
         log.debug("Пропуск (%s): %s", fx.reason, text[:80])
         if not cfg.quiet:
             await m.reply(f"<i>не фиксация: {texts.esc(fx.reason)}</i>")
+        return
+
+    # Приостановка ставится оператором снаружи, файлом в папке клиента.
+    # Проверяем здесь, а не раньше: пока сообщение не признано фиксацией,
+    # отвечать вообще незачем — иначе бот заговорит на каждую реплику.
+    if service_paused():
+        await m.reply(texts.service_paused(lang))
         return
 
     if not db.is_configured():

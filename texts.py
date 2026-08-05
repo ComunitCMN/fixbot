@@ -743,3 +743,120 @@ def admin_unknown_origin(client: str, p: Phone, agency: str | None,
             f"Чат: {esc(chat) or '—'}\n\n"
             f"Контакт есть в базе, но сделок нет, поэтому непонятно, "
             f"чей это клиент:\n{links}")
+
+
+# ===================== обслуживание =====================
+#
+# Тексты про деньги отделены от всего остального намеренно: их видит
+# владелец-застройщик, а не агенты. Агентам про оплату не пишется никогда —
+# это отношения между оператором и застройщиком.
+
+_MONTHS_RU = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
+              "августа", "сентября", "октября", "ноября", "декабря")
+
+
+def human_date(d, lang: str = RU) -> str:
+    if lang == RU:
+        return f"{d.day} {_MONTHS_RU[d.month - 1]}"
+    return d.strftime("%B %-d") if hasattr(d, "strftime") else str(d)
+
+
+def period_started(*, begin, due, plan, first: bool = True,
+                   lang: str = RU) -> str:
+    """
+    Начался оплачиваемый месяц.
+
+    Первый раз объясняем условия целиком, дальше — одной строкой: человек
+    их уже знает, и повторять каждый месяц значит превратить полезное
+    сообщение в шум, который перестанут читать.
+    """
+    b, d = human_date(begin, lang), human_date(due, lang)
+    cur = "$" if plan.currency == "USD" else plan.currency + " "
+
+    if not first:
+        if lang == RU:
+            return (f"📅 Новый период обслуживания: с {b}.\n"
+                    f"Счёт пришлю к {d}.")
+        return (f"📅 New service period started on {b}.\n"
+                f"I'll send the invoice by {d}.")
+
+    if lang == RU:
+        return (
+            f"📅 <b>Начался период обслуживания</b>\n\n"
+            f"С {b} идёт первый оплачиваемый месяц. Оплата — к {d}, "
+            f"за прошедший период.\n\n"
+            f"<b>Сколько:</b>\n"
+            f"• до {plan.threshold} фиксаций — {cur}{plan.low}\n"
+            f"• от {plan.threshold} фиксаций — {cur}{plan.high}\n\n"
+            f"Считаются только фиксации, которые попали в вашу CRM — "
+            f"то есть те, где агент нажал кнопку и сделка создалась. "
+            f"Проверки без подтверждения в счёт не идут.\n\n"
+            f"Ближе к сроку пришлю сумму, число фиксаций и реквизиты "
+            f"криптокошелька. Ничего делать заранее не нужно.")
+    return (
+        f"📅 <b>Service period started</b>\n\n"
+        f"Your first billable month began on {b}. Payment is due by {d}, "
+        f"for the period just ended.\n\n"
+        f"<b>Pricing:</b>\n"
+        f"• under {plan.threshold} registrations — {cur}{plan.low}\n"
+        f"• {plan.threshold} or more — {cur}{plan.high}\n\n"
+        f"Only registrations that reached your CRM are counted — the ones "
+        f"an agent confirmed and a deal was created for. Lookups without "
+        f"confirmation don't count.\n\n"
+        f"Closer to the date I'll send the amount, the count and the "
+        f"crypto wallet details. Nothing to do in advance.")
+
+
+def invoice(*, begin, due, fixations: int, amount: int, currency: str,
+            wallet: str, wallet_note: str = "", lang: str = RU) -> str:
+    """Счёт клиенту. Сумма, за что, куда платить — и ничего лишнего."""
+    b, d = human_date(begin, lang), human_date(due, lang)
+    cur = "$" if currency == "USD" else currency + " "
+    note = f" ({esc(wallet_note)})" if wallet_note else ""
+
+    if lang == RU:
+        return (
+            f"💳 <b>Счёт за обслуживание</b>\n\n"
+            f"Период: {b} — {d}\n"
+            f"Фиксаций в CRM: <b>{fixations}</b>\n"
+            f"К оплате: <b>{cur}{amount}</b>\n\n"
+            f"Кошелёк{note}:\n<code>{esc(wallet)}</code>\n\n"
+            f"Оплатить до {d}. Как переведёте — напишите, я отмечу.")
+    return (
+        f"💳 <b>Service invoice</b>\n\n"
+        f"Period: {b} — {d}\n"
+        f"Registrations in CRM: <b>{fixations}</b>\n"
+        f"Amount due: <b>{cur}{amount}</b>\n\n"
+        f"Wallet{note}:\n<code>{esc(wallet)}</code>\n\n"
+        f"Please pay by {d}. Drop me a line once you have — I'll mark it.")
+
+
+def invoice_reminder(*, due, amount: int, currency: str, wallet: str,
+                     lang: str = RU) -> str:
+    """
+    Одно напоминание, без нажима. Клиент мог просто забыть, и разговаривать
+    с ним как с должником — плохая идея, отношения дороже.
+    """
+    d = human_date(due, lang)
+    cur = "$" if currency == "USD" else currency + " "
+    if lang == RU:
+        return (f"🔔 Напоминаю про оплату обслуживания за период до {d} — "
+                f"<b>{cur}{amount}</b>.\n\n<code>{esc(wallet)}</code>\n\n"
+                f"Если уже оплатили, просто напишите — сверю.")
+    return (f"🔔 A reminder about the service payment due {d} — "
+            f"<b>{cur}{amount}</b>.\n\n<code>{esc(wallet)}</code>\n\n"
+            f"If you've already paid, just say so and I'll check.")
+
+
+def service_paused(lang: str = RU) -> str:
+    """
+    Что видит агент, когда бот приостановлен.
+
+    Про деньги — ни слова. Отношения оператора с застройщиком агентов
+    не касаются, и узнавать о чужих долгах они не должны.
+    """
+    if lang == RU:
+        return ("⏸ Проверка временно недоступна.\n"
+                "Уточните у своего менеджера.")
+    return ("⏸ Lookups are temporarily unavailable.\n"
+            "Please check with your manager.")

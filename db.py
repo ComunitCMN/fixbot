@@ -215,6 +215,45 @@ CREATE TABLE IF NOT EXISTS meta (
     value      TEXT,
     PRIMARY KEY (account_id, key)
 );
+
+-- Обслуживание клиентов. Живёт ТОЛЬКО в базе оператора: биллинг ведётся
+-- из его бота, а базы клиентов трогаются лишь на чтение — иначе у файла
+-- окажется два хозяина.
+--
+-- Даты хранятся строками YYYY-MM-DD, а не отметками времени: тут важен
+-- календарный день, а не момент, и часовые пояса только мешали бы.
+CREATE TABLE IF NOT EXISTS billing (
+    slug           TEXT PRIMARY KEY,   -- папка клиента
+    start_date     TEXT NOT NULL,      -- когда началось обслуживание
+    threshold      INTEGER NOT NULL DEFAULT 100,
+    low            INTEGER NOT NULL DEFAULT 40,
+    high           INTEGER NOT NULL DEFAULT 70,
+    currency       TEXT NOT NULL DEFAULT 'USD',
+    wallet         TEXT,               -- адрес кошелька
+    wallet_note    TEXT,               -- сеть, например USDT TRC-20
+    wallet_qr      TEXT,               -- file_id картинки в Telegram
+    closed_due     TEXT,               -- срок последнего оплаченного периода
+    paused         INTEGER NOT NULL DEFAULT 0,
+    enabled        INTEGER NOT NULL DEFAULT 1
+);
+
+-- По строке на период. Хранить историю нужно не для красоты: если клиент
+-- заспорит о сумме, только здесь видно, когда и за что выставляли.
+CREATE TABLE IF NOT EXISTS billing_periods (
+    slug         TEXT NOT NULL,
+    due          TEXT NOT NULL,         -- срок оплаты, он же ключ периода
+    begin        TEXT NOT NULL,
+    fixations    INTEGER,
+    amount       INTEGER,
+    announced    INTEGER NOT NULL DEFAULT 0,
+    prepared     INTEGER NOT NULL DEFAULT 0,
+    invoice_sent INTEGER NOT NULL DEFAULT 0,
+    reminded     INTEGER NOT NULL DEFAULT 0,
+    warned       INTEGER NOT NULL DEFAULT 0,
+    paid_at      INTEGER,
+    last_nudge   TEXT,
+    PRIMARY KEY (slug, due)
+);
 """
 
 #: Колонки, добавленные после первого релиза. Ключ — таблица.
@@ -1278,3 +1317,90 @@ class Db:
             (self.account_id, key, value),
         )
         self.conn.commit()
+
+    # ================= обслуживание =================
+    #
+    # Только у оператора. Клиентские базы отсюда не трогаются вовсе:
+    # у каждого файла должен быть один хозяин.
+
+    def set_billing(self, slug: str, *, start_date: str,
+                    threshold: int = 100, low: int = 40, high: int = 70,
+                    currency: str = "USD") -> None:
+        self.conn.execute(
+            "INSERT INTO billing (slug, start_date, threshold, low, high,"
+            " currency) VALUES (?,?,?,?,?,?)"
+            " ON CONFLICT(slug) DO UPDATE SET start_date=excluded.start_date,"
+            "  threshold=excluded.threshold, low=excluded.low,"
+            "  high=excluded.high, currency=excluded.currency",
+            (slug, start_date, threshold, low, high, currency))
+        self.conn.commit()
+
+    def get_billing(self, slug: str):
+        return self.conn.execute(
+            "SELECT * FROM billing WHERE slug=?", (slug,)).fetchone()
+
+    def all_billing(self) -> list:
+        return list(self.conn.execute(
+            "SELECT * FROM billing WHERE enabled=1 ORDER BY slug"))
+
+    def set_wallet(self, slug: str, wallet: str, note: str = "",
+                   qr: str | None = None) -> None:
+        """
+        Реквизиты живут в базе, а не в настройках: кошелёк меняется,
+        а `.env` лежит рядом с кодом и правится только руками на сервере.
+        """
+        self.conn.execute(
+            "UPDATE billing SET wallet=?, wallet_note=?,"
+            " wallet_qr=COALESCE(?, wallet_qr) WHERE slug=?",
+            (wallet, note, qr, slug))
+        self.conn.commit()
+
+    def set_paused(self, slug: str, paused: bool) -> None:
+        self.conn.execute("UPDATE billing SET paused=? WHERE slug=?",
+                          (int(paused), slug))
+        self.conn.commit()
+
+    # ---------- периоды ----------
+
+    def period(self, slug: str, due: str, begin: str = ""):
+        """Строка периода, создавая её при первом обращении."""
+        row = self.conn.execute(
+            "SELECT * FROM billing_periods WHERE slug=? AND due=?",
+            (slug, due)).fetchone()
+        if row is None:
+            self.conn.execute(
+                "INSERT INTO billing_periods (slug, due, begin)"
+                " VALUES (?,?,?)", (slug, due, begin or due))
+            self.conn.commit()
+            row = self.conn.execute(
+                "SELECT * FROM billing_periods WHERE slug=? AND due=?",
+                (slug, due)).fetchone()
+        return row
+
+    def mark_period(self, slug: str, due: str, **fields) -> None:
+        allowed = {"fixations", "amount", "announced", "prepared",
+                   "invoice_sent", "reminded", "warned", "paid_at",
+                   "last_nudge"}
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"неизвестные поля периода: {sorted(bad)}")
+        sets = ", ".join(f"{k}=?" for k in fields)
+        self.conn.execute(
+            f"UPDATE billing_periods SET {sets} WHERE slug=? AND due=?",
+            (*fields.values(), slug, due))
+        self.conn.commit()
+
+    def close_period(self, slug: str, due: str, paid_at: int) -> None:
+        """Отмечает период оплаченным и двигает клиента к следующему."""
+        self.conn.execute(
+            "UPDATE billing_periods SET paid_at=? WHERE slug=? AND due=?",
+            (paid_at, slug, due))
+        self.conn.execute(
+            "UPDATE billing SET closed_due=?, paused=0 WHERE slug=?",
+            (due, slug))
+        self.conn.commit()
+
+    def period_history(self, slug: str, limit: int = 12) -> list:
+        return list(self.conn.execute(
+            "SELECT * FROM billing_periods WHERE slug=?"
+            " ORDER BY due DESC LIMIT ?", (slug, limit)))

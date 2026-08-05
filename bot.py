@@ -1443,13 +1443,15 @@ async def on_private_any(m: Message) -> None:
     """
     if (m.text or "").startswith("/"):
         return
-    if await try_onboarding_step(m):
-        return
-    # Реквизиты — раньше рассылки: оператор может быть в обоих режимах
-    # сразу, и адрес кошелька не должен уехать агентствам.
+    # Сначала — ответы на вопрос, заданный только что нажатой кнопкой.
+    # Мастер подключения живёт неделями, а незаконченная заявка иначе
+    # съедает всё подряд: дата обслуживания уходила ему, и он отвечал
+    # «не похоже на ключ бота».
     if await try_wallet_reply(m):
         return
     if await try_billing_start_reply(m):
+        return
+    if await try_onboarding_step(m):
         return
     if await try_add_staff(m):
         return
@@ -2136,9 +2138,25 @@ async def cmd_broadcast(m: Message) -> None:
 
 @dp.message(Command("cancel"), F.chat.type == "private")
 async def cmd_cancel_broadcast(m: Message) -> None:
-    if m.from_user:
-        _awaiting_broadcast.pop(m.from_user.id, None)
-    await m.answer("Отменено.")
+    """
+    Общая отмена: рассылка, ввод реквизитов и незаконченное подключение.
+
+    Раньше отменялась только рассылка, и брошенная заявка оставалась
+    висеть навсегда, перехватывая любое сообщение в личке.
+    """
+    if not m.from_user:
+        return
+    uid = m.from_user.id
+    _awaiting_broadcast.pop(uid, None)
+    db.set_meta(f"await_wallet:{uid}", "")
+    db.set_meta(f"await_start:{uid}", "")
+
+    what = ["Отменено."]
+    row = db.active_onboarding(uid)
+    if row:
+        db.update_onboarding(row["id"], status="rejected")
+        what.append("Незаконченное подключение закрыто.")
+    await m.answer(" ".join(what))
 
 
 @dp.message(Command("stop"), F.chat.type == "private")

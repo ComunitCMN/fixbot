@@ -240,3 +240,25 @@ def test_startup_calls_only_names_that_exist():
         and not hasattr(b, n.id))
 
     assert missing == [], f"main() зовёт несуществующее: {missing}"
+
+
+def test_button_answers_are_handled_before_the_wizard():
+    """
+    Мастер подключения живёт неделями. Незаконченная заявка перехватывала
+    всё подряд: дата обслуживания уходила ей, и бот отвечал «не похоже
+    на ключ бота». Ответ на только что заданный вопрос должен быть первым.
+    """
+    import bot as b
+
+    src = inspect.getsource(b.on_private_any)
+    assert src.index("try_billing_start_reply") < src.index("try_onboarding_step")
+    assert src.index("try_wallet_reply") < src.index("try_onboarding_step")
+
+
+def test_cancel_closes_a_stuck_onboarding():
+    """Иначе брошенная заявка висит вечно и ест каждое сообщение."""
+    import bot as b
+
+    src = inspect.getsource(b.cmd_cancel_broadcast)
+    assert "active_onboarding" in src and 'status="rejected"' in src
+    assert "await_wallet" in src and "await_start" in src

@@ -4,6 +4,7 @@ import time
 from types import SimpleNamespace
 
 import menu as mn
+import texts
 from db import Db
 
 NOW = int(time.time())
@@ -195,3 +196,40 @@ def test_stats_text_renders(tmp_path):
         rejected=db.rejected_by_verdict())
     assert "ERA B" in out and "за 30 дней" in out
     assert "{" not in out
+
+
+# ===================== чужой человек и /admin =====================
+
+def test_admin_does_not_stay_silent_for_strangers():
+    """
+    Молчание в ответ на команду читается как «бот сломался». Владелец
+    Eco Invest написал «/admin» три раза подряд в чужого бота и не получил
+    ни слова — потому что доступа к меню у него там нет.
+    """
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b.cmd_admin)
+    body = src.split("if not has_menu", 1)[1]
+    # До выхода из обработчика человеку должны хоть что-то ответить.
+    before_return = body.split("return", 1)[0]
+    assert "m.answer" in before_return, (
+        "cmd_admin снова молча выходит для тех, у кого нет меню")
+
+
+def test_no_menu_text_hints_about_wrong_bot():
+    """У оператора несколько ботов, и перепутать их — обычное дело."""
+    for lang in ("ru", "en"):
+        out = texts.t(lang, "no_menu")
+        assert out and "{" not in out
+    assert "не тому боту" in texts.t("ru", "no_menu")
+    assert "wrong bot" in texts.t("en", "no_menu")
+
+
+def test_no_menu_does_not_scold():
+    """Тон мягкий и здесь: человек не виноват, что ошибся ботом."""
+    harsh = ("запрещ", "нельзя", "ошибка", "неверн", "denied", "forbidden")
+    for lang in ("ru", "en"):
+        low = texts.t(lang, "no_menu").lower()
+        assert not any(w in low for w in harsh), low

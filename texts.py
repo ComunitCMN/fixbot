@@ -190,6 +190,13 @@ STR: dict[str, dict[str, str]] = {
 
         "dm_hello": ("👋 Готово, теперь я буду писать вам сюда о движении "
                      "ваших клиентов."),
+        # Молчать в ответ на команду нельзя: человек решит, что бот сломался,
+        # и будет жать её снова. А ещё это может быть владелец, перепутавший
+        # бота, — таких у оператора несколько.
+        "no_menu": ("Это служебная команда — у вас к ней доступа нет, "
+                    "и ничего страшного: для работы она не нужна.\n\n"
+                    "Если вы застройщик и ждёте своё меню — возможно, вы "
+                    "написали не тому боту. У каждого застройщика он свой."),
         "dm_fixation": ("Вы отслеживаете:\n"
                         "<b>{client}</b> — <code>{phone}</code>\n"
                         "Агентство: {agency}\nСтатус: {status}"),
@@ -399,6 +406,10 @@ STR: dict[str, dict[str, str]] = {
 
         "dm_hello": ("👋 All set — I'll message you here whenever your "
                      "clients move forward."),
+        "no_menu": ("That's a service command — you don't have access to it, "
+                    "and you don't need it for your work.\n\n"
+                    "If you're a developer waiting for your own menu, you may "
+                    "have messaged the wrong bot. Each developer has their own."),
         "dm_fixation": ("You're tracking:\n"
                         "<b>{client}</b> — <code>{phone}</code>\n"
                         "Agency: {agency}\nStatus: {status}"),

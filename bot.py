@@ -1850,7 +1850,13 @@ def has_menu(user_id: int) -> bool:
 
 @dp.message(Command("admin", "menu"), F.chat.type == "private")
 async def cmd_admin(m: Message) -> None:
-    if not m.from_user or not has_menu(m.from_user.id):
+    if not m.from_user:
+        return
+    if not has_menu(m.from_user.id):
+        # Раньше здесь было молчание, и это путало: владелец другого бота
+        # написал «/admin» трижды подряд, решив, что бот завис.
+        lang = agent_lang(db.get_agent(m.from_user.id))
+        await m.answer(texts.t(lang, "no_menu"))
         return
     role = role_of(m.from_user.id)
     await m.answer(mn.root_text(role, cfg.developer_name),

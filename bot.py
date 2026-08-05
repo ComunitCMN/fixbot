@@ -2476,42 +2476,6 @@ async def _is_chat_admin(c: CallbackQuery) -> bool:
 
 # Ловит всё прочее в личке — поэтому регистрируется последним, после
 # всех команд. Иначе перехватил бы /my, /notify, /broadcast и остальные.
-dp.message.register(on_private_any, F.chat.type == "private")
-
-
-async def main() -> None:
-    phones.set_default_region(cfg.default_region)
-    texts.SHOW_LINKS = cfg.show_crm_links
-    if not db.get_meta("contacts_synced_at"):
-        try:
-            await sync_all()
-        except Exception:  # noqa: BLE001
-            log.exception("Первая синхронизация не удалась")
-    if not db.is_configured():
-        log.warning("Воронки не размечены — выполните /pipelines в чате с ботом")
-    try:
-        me = await bot.get_me()
-        global BOT_USERNAME
-        BOT_USERNAME = me.username or ""
-    except Exception:  # noqa: BLE001
-        log.exception("не смог узнать имя бота — кнопка подписки не появится")
-
-    asyncio.create_task(sync_loop())
-    asyncio.create_task(expire_loop())
-    asyncio.create_task(status_loop())
-    if is_operator_bot():
-        asyncio.create_task(billing_loop())
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await amo.close()
-        await clf.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
-
 # ==========================================================================
 # Обслуживание клиентов
 #
@@ -2789,3 +2753,39 @@ async def try_billing_start_reply(m: Message) -> bool:
             InlineKeyboardButton(text="💳 Задать реквизиты",
                                  callback_data=f"bl:wallet:{slug}")]]))
     return True
+
+
+dp.message.register(on_private_any, F.chat.type == "private")
+
+
+async def main() -> None:
+    phones.set_default_region(cfg.default_region)
+    texts.SHOW_LINKS = cfg.show_crm_links
+    if not db.get_meta("contacts_synced_at"):
+        try:
+            await sync_all()
+        except Exception:  # noqa: BLE001
+            log.exception("Первая синхронизация не удалась")
+    if not db.is_configured():
+        log.warning("Воронки не размечены — выполните /pipelines в чате с ботом")
+    try:
+        me = await bot.get_me()
+        global BOT_USERNAME
+        BOT_USERNAME = me.username or ""
+    except Exception:  # noqa: BLE001
+        log.exception("не смог узнать имя бота — кнопка подписки не появится")
+
+    asyncio.create_task(sync_loop())
+    asyncio.create_task(expire_loop())
+    asyncio.create_task(status_loop())
+    if is_operator_bot():
+        asyncio.create_task(billing_loop())
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await amo.close()
+        await clf.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

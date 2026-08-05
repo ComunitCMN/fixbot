@@ -193,3 +193,50 @@ def test_bad_start_date_does_not_pass_silently():
 
     src = inspect.getsource(b.try_billing_start_reply)
     assert "ValueError" in src and "Не разобрал дату" in src
+
+
+def test_nothing_is_defined_after_the_launch_block():
+    """
+    Всё, что дописано после `if __name__ == "__main__"`, до запуска бота
+    не доходит: строки ниже просто не выполняются. Однажды так и вышло —
+    раздел «Оплаты» дописали в конец файла, и бот упал на старте
+    с NameError, не сказав ничего внятного.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path(__file__).parent / "bot.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    last = tree.body[-1]
+
+    assert isinstance(last, ast.If), (
+        "последним в bot.py должен быть блок запуска, а не "
+        f"{type(last).__name__} на строке {last.lineno}")
+    assert "__main__" in ast.dump(last.test)
+
+
+def test_startup_calls_only_names_that_exist():
+    """
+    Прямая проверка того, из-за чего бот и упал: всё, что вызывает main(),
+    должно существовать в модуле к моменту запуска.
+    """
+    import ast
+    import builtins
+    import inspect
+
+    import bot as b
+
+    tree = ast.parse(inspect.getsource(b.main))
+    local = {a.arg for f in ast.walk(tree)
+             if isinstance(f, ast.arguments) for a in f.args}
+    local |= {t.id for n in ast.walk(tree)
+              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+              for t in [n]}
+
+    missing = sorted(
+        n.id for n in ast.walk(tree)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        and n.id not in local and not hasattr(builtins, n.id)
+        and not hasattr(b, n.id))
+
+    assert missing == [], f"main() зовёт несуществующее: {missing}"

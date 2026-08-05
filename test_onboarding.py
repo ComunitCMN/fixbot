@@ -373,3 +373,31 @@ def test_summary_hides_secrets(tmp_path):
     out = onb.summary_for_operator(db.get_onboarding(oid))
     assert "SECRET-BOT-TOKEN" not in out
     assert "SECRET-AMO-TOKEN" not in out
+
+
+def test_tests_can_never_touch_real_services():
+    """
+    Однажды прогон тестов на сервере создал живые службы fixbot@romashka
+    и fixbot@dup. Больше такого быть не должно ни при каких условиях.
+    """
+    import os
+
+    assert os.getenv("FIXBOT_TESTING") == "1", "conftest не выставил признак"
+    assert pv.has_systemd() is False
+
+
+@pytest.mark.asyncio
+async def test_deploy_under_tests_never_calls_systemctl(tmp_path, monkeypatch):
+    called = []
+
+    async def boom(*args):
+        called.append(args)
+        return 0, ""
+
+    monkeypatch.setattr(pv, "_run", boom)
+    report = await pv.deploy(clients_dir=str(tmp_path), slug="romashka",
+                             env_text="A=1\n")
+
+    assert called == [], f"тест дошёл до системной команды: {called}"
+    assert report["started"] is False
+    assert (tmp_path / "romashka" / ".env").exists()

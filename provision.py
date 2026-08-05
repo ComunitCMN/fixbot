@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -113,6 +114,17 @@ async def _run(*args: str) -> tuple[int, str]:
 
 
 def has_systemd() -> bool:
+    """
+    Есть ли на машине службы — и можно ли их трогать.
+
+    Проверка на тесты здесь не для красоты. Прогон тестов на сервере
+    однажды дошёл до настоящего `systemctl enable --now` и завёл две
+    службы для несуществующих клиентов, `fixbot@romashka` и `fixbot@dup`,
+    прямо в живой системе. Тесты обязаны быть безобидными, поэтому под
+    ними разворачивание всегда считает, что systemd нет.
+    """
+    if os.getenv("FIXBOT_TESTING") == "1":
+        return False
     return shutil.which("systemctl") is not None
 
 

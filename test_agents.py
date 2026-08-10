@@ -343,3 +343,44 @@ def test_deep_link_payload_roundtrip():
     payload = f"fix{fid}"
     assert payload.startswith("fix") and payload[3:].isdigit()
     assert int(payload[3:]) == fid
+
+
+# ===================== выбор агентства кнопкой =====================
+
+def test_callback_objects_are_never_mutated():
+    """
+    Объекты aiogram неизменяемы: присваивание в c.data роняет обработчик
+    с «Instance is frozen». Из-за этого выбор агентства кнопкой не работал
+    вообще, а в логе выглядел как успешно обработанное нажатие.
+    """
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b)
+    assert "c.data = " not in src, "снова правим неизменяемый объект"
+
+
+def test_pending_id_can_be_passed_explicitly():
+    """Именно так теперь и передаётся номер заявки — без подмены данных."""
+    import inspect
+
+    import bot as b
+
+    assert "pending_id" in inspect.signature(b._load_pending).parameters
+    assert "_load_pending(c, int(pid))" in inspect.getsource(b.cb_set_agency)
+
+
+def test_frozen_assignment_really_fails():
+    """
+    Проверяем сам запрет, а не наше представление о нём: если однажды
+    aiogram разрешит правку, тест перестанет иметь смысл и это будет видно.
+    """
+    import pytest
+    from aiogram.types import CallbackQuery, User
+
+    c = CallbackQuery(id="1", from_user=User(id=1, is_bot=False,
+                                             first_name="T"),
+                      chat_instance="x", data="pset:5:7")
+    with pytest.raises(Exception, match="frozen"):
+        c.data = "pset:5"

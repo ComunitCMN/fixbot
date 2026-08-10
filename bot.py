@@ -1036,9 +1036,17 @@ async def try_agency_reply(m: Message) -> bool:
     return True
 
 
-async def _load_pending(c: CallbackQuery) -> dict | None:
-    """Достаёт заявку и проверяет, что жмёт именно её автор."""
-    pending_id = int(c.data.split(":")[1])
+async def _load_pending(c: CallbackQuery,
+                        pending_id: int | None = None) -> dict | None:
+    """
+    Достаёт заявку и проверяет, что жмёт именно её автор.
+
+    Номер можно передать явно. Раньше вызывающий переписывал `c.data`,
+    чтобы номер разобрался отсюда, — но объекты aiogram неизменяемы,
+    и это молча роняло выбор агентства.
+    """
+    if pending_id is None:
+        pending_id = int(c.data.split(":")[1])
     row = db.get_pending(pending_id)
     if not row:
         await c.answer("Заявка не найдена", show_alert=True)
@@ -1183,8 +1191,7 @@ async def cb_change_agency(c: CallbackQuery) -> None:
 @dp.callback_query(F.data.startswith("pset:"))
 async def cb_set_agency(c: CallbackQuery) -> None:
     _, pid, aid = c.data.split(":")
-    c.data = f"pset:{pid}"          # чтобы _load_pending разобрал id
-    row = await _load_pending(c)
+    row = await _load_pending(c, int(pid))
     if not row:
         return
     agency = db.get_agency(int(aid))

@@ -388,3 +388,59 @@ def test_menu_knows_which_bot_it_is():
     import bot as b
 
     assert "is_operator_bot()" in inspect.getsource(b.cmd_admin)
+
+
+# ===================== закрепление агентства из группы =====================
+
+def test_empty_directory_is_not_a_dead_end():
+    """
+    У нового застройщика справочник пуст. Раньше кнопка отвечала
+    «Справочник агентств пуст» — и всё, дальше идти было некуда.
+    """
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b.cb_chats)
+    assert "Справочник агентств пуст" not in src
+    assert "chname:" in src            # ввести название вручную
+    assert "chmake:" in src            # создать по догадке из чата
+
+
+def test_guess_comes_from_the_chat_title():
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b.cb_chats)
+    assert "agency_from_chat_title" in src
+
+
+def test_existing_agency_is_not_offered_twice():
+    """Кнопка «создать» не должна появляться для того, что уже в базе."""
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b.cb_chats)
+    assert "norm_agency(guess) not in" in src
+
+
+def test_agency_reply_is_handled_in_the_private_chain():
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b.on_private_any)
+    assert "try_chat_agency_reply" in src
+    assert src.index("try_chat_agency_reply") < src.index("try_onboarding_step")
+
+
+def test_binding_creates_and_attaches(tmp_path):
+    """Создание и привязка — одно действие, иначе легко забыть второе."""
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b._bind_agency)
+    assert "create_agency" in src and "chat_agency:" in src

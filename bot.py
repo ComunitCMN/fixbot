@@ -1467,6 +1467,8 @@ async def on_private_any(m: Message) -> None:
         return
     if await try_billing_start_reply(m):
         return
+    if await try_chat_agency_reply(m):
+        return
     if await try_onboarding_step(m):
         return
     if await try_add_staff(m):
@@ -2829,19 +2831,38 @@ async def cb_chats(c: CallbackQuery) -> None:
         row["lang"] = "" if code == "auto" else code
 
     if action == "agency":
+        # Справочник может быть пуст — у нового застройщика так и есть.
+        # Тупика тут быть не должно: предлагаем создать прямо отсюда,
+        # подставив догадку из названия чата.
         agencies = db.list_agencies()
-        if not agencies:
-            await c.answer("Справочник агентств пуст", show_alert=True)
-            return
-        kb = [[InlineKeyboardButton(
+        known = [{"name": a["name"], "norm": a["norm_name"],
+                  "agency_id": a["id"]} for a in agencies]
+        guess = ag.agency_from_chat_title(
+            row["title"] or "", cfg.developer_name, known)
+
+        kb: list[list[InlineKeyboardButton]] = []
+        if guess and ag.norm_agency(guess) not in {a["norm_name"]
+                                                   for a in agencies}:
+            db.set_meta(f"chat_guess:{chat_id}", guess)
+            kb.append([InlineKeyboardButton(
+                text=f"➕ Создать «{guess[:24]}»",
+                callback_data=f"chmake:{chat_id}")])
+
+        kb += [[InlineKeyboardButton(
             text=a["name"], callback_data=f"chset:{chat_id}:{a['id']}")]
             for a in agencies[:30]]
+        kb.append([InlineKeyboardButton(text="✏️ Ввести название",
+                                        callback_data=f"chname:{chat_id}")])
         kb.append([InlineKeyboardButton(text="← Назад",
                                         callback_data=f"ch:open:{chat_id}")])
+
+        head = (f"🏢 За каким агентством закрепить "
+                f"<b>{texts.esc(row['title'] or chat_id)}</b>?")
+        if not agencies:
+            head += ("\n\nСправочник пока пуст — первое агентство "
+                     "создаётся прямо здесь.")
         await c.message.edit_text(
-            f"🏢 За каким агентством закрепить "
-            f"<b>{texts.esc(row['title'] or chat_id)}</b>?",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+            head, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
         await c.answer()
         return
 
@@ -2922,6 +2943,69 @@ async def chat_alert_loop() -> None:
         except Exception:  # noqa: BLE001
             log.exception("Не смог сообщить о новой группе %s", chat_id)
         await asyncio.sleep(CHAT_ALERT_PAUSE)
+
+
+async def _bind_agency(chat_id: int, name: str) -> str:
+    """Создаёт агентство, если его ещё нет, и закрепляет за чатом."""
+    pretty = ag.pretty_name(name)
+    aid = db.create_agency(pretty, ag.norm_agency(pretty))
+    db.set_meta(f"chat_agency:{chat_id}", str(aid))
+    return pretty
+
+
+@dp.callback_query(F.data.startswith("chmake:"))
+async def cb_chat_make_agency(c: CallbackQuery) -> None:
+    """Создать агентство по догадке из названия чата и сразу закрепить."""
+    if not c.from_user or not has_menu(c.from_user.id):
+        await c.answer("Недоступно", show_alert=True)
+        return
+    chat_id = int(c.data.split(":")[1])
+    guess = db.get_meta(f"chat_guess:{chat_id}")
+    if not guess:
+        await c.answer("Не помню подсказку — введите название", show_alert=True)
+        return
+
+    name = await _bind_agency(chat_id, guess)
+    row = next((r for r in _chat_rows() if r["chat_id"] == chat_id), None)
+    if row:
+        await c.message.edit_text(
+            mn.chat_card(row),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=mn.chat_kb(chat_id, row["lang"])))
+    await c.answer(f"Создано: {name}")
+
+
+@dp.callback_query(F.data.startswith("chname:"))
+async def cb_chat_ask_agency(c: CallbackQuery) -> None:
+    if not c.from_user or not has_menu(c.from_user.id):
+        await c.answer("Недоступно", show_alert=True)
+        return
+    chat_id = c.data.split(":")[1]
+    db.set_meta(f"await_chat_agency:{c.from_user.id}", chat_id)
+    await c.message.answer(
+        "✏️ Пришлите название агентства <b>ответом на это сообщение</b>.\n"
+        "Например: <code>TEUS</code>",
+        reply_markup=ForceReply(selective=True))
+    await c.answer()
+
+
+async def try_chat_agency_reply(m: Message) -> bool:
+    """Оператор прислал название агентства для группы."""
+    if not m.from_user or not (m.text or "").strip():
+        return False
+    raw = db.get_meta(f"await_chat_agency:{m.from_user.id}")
+    if not raw:
+        return False
+
+    chat_id = int(raw)
+    name = await _bind_agency(chat_id, m.text)
+    db.set_meta(f"await_chat_agency:{m.from_user.id}", "")
+    await m.reply(
+        f"✅ Группа закреплена за <b>{texts.esc(name)}</b>.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="← К группе",
+                                 callback_data=f"ch:open:{chat_id}")]]))
+    return True
 
 
 dp.message.register(on_private_any, F.chat.type == "private")

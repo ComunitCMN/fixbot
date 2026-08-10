@@ -355,3 +355,36 @@ def test_alert_text_names_the_group():
     out = mn.new_chat_alert("TEUS & BREIG", -100, "TEUS")
     assert "TEUS & BREIG" in out and "TEUS" in out
     assert "{" not in out
+
+
+def test_operator_sections_only_in_the_operator_bot():
+    """
+    В боте застройщика нет ни папки клиентов, ни биллинга. Кнопки туда
+    вели бы в пустоту — человек решил бы, что сломалось.
+    """
+    client_bot = [b.text for r in mn.main_menu(mn.OPERATOR).inline_keyboard
+                  for b in r]
+    assert "🗂 Мои клиенты" not in client_bot
+    assert "💰 Оплаты" not in client_bot
+    # Техническое нужно и там: воронки размечает оператор.
+    assert "🔧 Техническое" in client_bot
+
+    pult = [b.text for r in mn.main_menu(mn.OPERATOR, True).inline_keyboard
+            for b in r]
+    assert "🗂 Мои клиенты" in pult and "💰 Оплаты" in pult
+
+
+def test_owner_never_sees_operator_sections():
+    for flag in (False, True):
+        labels = [b.text for r in mn.main_menu(mn.OWNER, flag).inline_keyboard
+                  for b in r]
+        assert not any(x in labels for x in
+                       ("🗂 Мои клиенты", "💰 Оплаты", "🔧 Техническое"))
+
+
+def test_menu_knows_which_bot_it_is():
+    import inspect
+
+    import bot as b
+
+    assert "is_operator_bot()" in inspect.getsource(b.cmd_admin)

@@ -1901,7 +1901,7 @@ async def cmd_admin(m: Message) -> None:
         return
     role = role_of(m.from_user.id)
     await m.answer(mn.root_text(role, cfg.developer_name),
-                   reply_markup=mn.main_menu(role))
+                   reply_markup=mn.main_menu(role, is_operator_bot()))
 
 
 @dp.callback_query(F.data.startswith("m:"))
@@ -1925,7 +1925,7 @@ async def cb_menu(c: CallbackQuery) -> None:
 
     if section == "root":
         await show(mn.root_text(role, cfg.developer_name),
-                   mn.main_menu(role))
+                   mn.main_menu(role, is_operator_bot()))
 
     elif section == "help":
         await show(mn.HELP_TEXT)
@@ -2939,6 +2939,20 @@ async def main() -> None:
     asyncio.create_task(status_loop())
     if is_operator_bot():
         asyncio.create_task(billing_loop())
+    # Снимаем вебхук, если он остался от прежней интеграции. Пока он
+    # висит, Telegram не отдаёт сообщения опросом — бот молчит и не может
+    # объяснить почему. Так и вышло, когда бота BREIG отцепили от прежнего
+    # сервиса: вебхук остался, и «/admin» уходил в пустоту.
+    #
+    # drop_pending_updates обязателен: у бота, который годами сидит
+    # в семидесяти чатах, накопленная очередь хлынет разом, и он начнёт
+    # отвечать на вчерашние сообщения живым агентам.
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        log.info("Вебхук снят, старые сообщения отброшены")
+    except Exception:  # noqa: BLE001
+        log.exception("Не смог снять вебхук — если бот молчит, дело в нём")
+
     try:
         await dp.start_polling(bot)
     finally:

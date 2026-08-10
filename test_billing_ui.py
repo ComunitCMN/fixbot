@@ -262,3 +262,22 @@ def test_cancel_closes_a_stuck_onboarding():
     src = inspect.getsource(b.cmd_cancel_broadcast)
     assert "active_onboarding" in src and 'status="rejected"' in src
     assert "await_wallet" in src and "await_start" in src
+
+
+def test_startup_removes_a_leftover_webhook():
+    """
+    Пока висит вебхук от прежней интеграции, Telegram не отдаёт сообщения
+    опросом: бот молчит и объяснить причину не может. Так и случилось
+    с ботом BREIG, снятым с прежнего сервиса.
+
+    Накопленную очередь при этом отбрасываем: у бота из семидесяти чатов
+    она хлынет разом, и он ответит на вчерашние сообщения живым агентам.
+    """
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b.main)
+    assert "delete_webhook" in src
+    assert "drop_pending_updates=True" in src
+    assert src.index("delete_webhook") < src.index("start_polling")

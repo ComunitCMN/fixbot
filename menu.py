@@ -34,7 +34,15 @@ def role_of(user_id: int, cfg, db) -> str:
     return NOBODY
 
 
-def main_menu(role: str) -> InlineKeyboardMarkup:
+def main_menu(role: str, operator_bot: bool = False) -> InlineKeyboardMarkup:
+    """
+    Меню по роли.
+
+    `operator_bot` — это пульт оператора, а не бот застройщика. Разделы
+    «Мои клиенты» и «Оплаты» есть только там: в клиентском боте нет ни
+    папки клиентов, ни биллинга, и открыв их, человек увидел бы пустоту
+    и решил, что сломалось.
+    """
     rows = [
         [InlineKeyboardButton(text="📣 Рассылка", callback_data="m:bcast")],
         [InlineKeyboardButton(text="💬 Группы", callback_data="m:chats")],
@@ -45,10 +53,11 @@ def main_menu(role: str) -> InlineKeyboardMarkup:
                               callback_data="m:help")],
     ]
     if role == OPERATOR:
-        rows.append([InlineKeyboardButton(text="🗂 Мои клиенты",
-                                          callback_data="m:clients")])
-        rows.append([InlineKeyboardButton(text="💰 Оплаты",
-                                          callback_data="m:billing")])
+        if operator_bot:
+            rows.append([InlineKeyboardButton(text="🗂 Мои клиенты",
+                                              callback_data="m:clients")])
+            rows.append([InlineKeyboardButton(text="💰 Оплаты",
+                                              callback_data="m:billing")])
         rows.append([InlineKeyboardButton(text="🔧 Техническое",
                                           callback_data="m:tech")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -3,6 +3,8 @@
 import time
 from types import SimpleNamespace
 
+import pytest
+
 import menu as mn
 import texts
 from db import Db
@@ -462,14 +464,37 @@ def test_group_titles_are_escaped():
         assert " & " not in out
 
 
-def test_menu_always_answers_the_tap():
+@pytest.mark.asyncio
+async def test_every_button_answers_even_when_the_handler_breaks():
     """
-    Обработчик обязан ответить на нажатие даже при сбое: иначе кнопка
-    висит в загрузке и выглядит как зависший бот.
+    Telegram крутит «часики», пока бот не подтвердит нажатие. Любой сбой
+    оставлял человека с вечным спиннером и без объяснения — так было
+    и с разметкой в названии группы, и с выбором агентства.
     """
-    import inspect
-
     import bot as b
 
-    src = inspect.getsource(b.cb_menu)
-    assert "except Exception" in src and "c.answer(" in src
+    answered = []
+
+    class FakeCallback:
+        data = "ch:open:-100"
+
+        async def answer(self, text="", show_alert=False):
+            answered.append(text)
+
+    async def broken(event, data):
+        raise RuntimeError("название сломало разметку")
+
+    await b.answer_even_on_failure(broken, FakeCallback(), {})
+
+    assert answered, "кнопка осталась без ответа — спиннер завис бы"
+    assert "разметку" in answered[0]
+
+
+@pytest.mark.asyncio
+async def test_guard_does_not_swallow_normal_results():
+    import bot as b
+
+    async def fine(event, data):
+        return "готово"
+
+    assert await b.answer_even_on_failure(fine, object(), {}) == "готово"

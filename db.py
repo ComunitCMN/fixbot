@@ -280,6 +280,19 @@ MIGRATIONS = {
         # надоела реклама, не должен заодно потерять уведомления о своих
         # клиентах — ради них он и подписывался.
         ("bcast", "INTEGER"),
+        # Пусто или «active» — обычный агент. «pending» — частник подал
+        # заявку и ждёт владельца, «rejected» — владелец отказал.
+        # У всех, кто был в базе до этой правки, поле пустое, и правило
+        # доступа понимает это как обычного агента.
+        ("status", "TEXT"),
+        # Имя, которым частник представился сам.
+        ("intro_name", "TEXT"),
+    ],
+    "agencies": [
+        # Частный агент заводится обычным агентством с этой пометкой:
+        # тогда ниже по течению — компания в CRM, статистика, разрез
+        # по агентствам — ничего менять не надо.
+        ("private", "INTEGER"),
     ],
     "statuses": [
         ("type", "INTEGER"),
@@ -1460,3 +1473,41 @@ class Db:
     def chat_agency_id(self, chat_id: int) -> int | None:
         raw = self.get_meta(f"chat_agency:{chat_id}")
         return int(raw) if raw and raw.isdigit() else None
+
+    # ================= частные агенты =================
+
+    def set_agent_status(self, telegram_id: int, status: str,
+                         intro_name: str | None = None) -> None:
+        self.conn.execute(
+            "UPDATE agents SET status=?,"
+            " intro_name=COALESCE(?, intro_name)"
+            " WHERE account_id=? AND telegram_id=?",
+            (status, intro_name, self.account_id, telegram_id))
+        self.conn.commit()
+
+    def pending_agents(self) -> list:
+        """Заявки частников, ждущие владельца."""
+        return list(self.conn.execute(
+            "SELECT * FROM agents WHERE account_id=? AND status='pending'"
+            " ORDER BY created_at", (self.account_id,)))
+
+    def create_private_agency(self, full_name: str) -> int:
+        """
+        Заводит частника обычным агентством с пометкой «частный».
+
+        Название — его ФИО: так он попадёт в CRM отдельной компанией
+        и будет виден в статистике наравне с агентствами.
+        """
+        from agencies import norm_agency, pretty_name
+
+        name = pretty_name(full_name)
+        aid = self.create_agency(name, norm_agency(name))
+        self.conn.execute(
+            "UPDATE agencies SET private=1 WHERE id=?", (aid,))
+        self.conn.commit()
+        return aid
+
+    def is_private_agency(self, agency_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT private FROM agencies WHERE id=?", (agency_id,)).fetchone()
+        return bool(row and row["private"])

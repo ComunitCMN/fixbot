@@ -172,3 +172,59 @@ def test_bot_passes_the_chat_along():
     assert "in_bound_chat" in inspect.getsource(b.access_of)
     assert "access_of(m.from_user.id, m.chat.id)" in \
         inspect.getsource(b.allowed_to_look_up)
+
+
+# ===================== база: статус и частники =====================
+
+def test_migration_adds_columns_to_an_existing_base(tmp_path):
+    """
+    Базы на сервере боевые: колонки должны добавляться к живой таблице,
+    а не появляться только у новых баз.
+    """
+    import sqlite3
+
+    from db import Db
+
+    path = tmp_path / "old.db"
+    Db(path).conn.close()                       # база «старого» образца
+    conn = sqlite3.connect(path)
+    conn.execute("ALTER TABLE agents DROP COLUMN status")
+    conn.execute("ALTER TABLE agents DROP COLUMN intro_name")
+    conn.execute("ALTER TABLE agencies DROP COLUMN private")
+    conn.commit()
+    conn.close()
+
+    db = Db(path)                               # открываем новым кодом
+    cols = {r["name"] for r in db.conn.execute("PRAGMA table_info(agents)")}
+    assert {"status", "intro_name"} <= cols
+    cols = {r["name"] for r in db.conn.execute("PRAGMA table_info(agencies)")}
+    assert "private" in cols
+
+
+def test_private_agent_becomes_an_agency(tmp_path):
+    from db import Db
+
+    db = Db(tmp_path / "p.db")
+    aid = db.create_private_agency("  иван   петров ")
+
+    assert db.is_private_agency(aid)
+    assert db.get_agency(aid)["name"] == "иван петров"
+    # Обычное агентство пометки не получает.
+    other = db.create_agency("TEUS", "teus")
+    assert not db.is_private_agency(other)
+
+
+def test_application_waits_and_then_resolves(tmp_path):
+    from db import Db
+
+    db = Db(tmp_path / "a.db")
+    db.upsert_agent(42, "ivan", "Иван")
+    db.set_agent_status(42, "pending", intro_name="Иван Петров")
+
+    assert [r["telegram_id"] for r in db.pending_agents()] == [42]
+    assert db.get_agent(42)["intro_name"] == "Иван Петров"
+
+    db.set_agent_status(42, "active")
+    assert db.pending_agents() == []
+    # Имя, которым представился, не теряется после решения.
+    assert db.get_agent(42)["intro_name"] == "Иван Петров"

@@ -49,6 +49,7 @@ import onboarding as onb
 import provision as pv
 import i18n
 import phones
+import private_agents as pag
 import texts
 import verdict as vd
 from amo import AmoClient, compute_origins
@@ -1520,7 +1521,21 @@ async def on_private_text(m: Message) -> None:
     """
     if not m.from_user or (m.text or "").startswith("/"):
         return
-    lang = agent_lang(db.get_agent(m.from_user.id))
+
+    uid = m.from_user.id
+    agent = db.get_agent(uid)
+    lang = agent_lang(agent, i18n.detect(m.text or "", cfg.default_lang))
+    state = access_of(uid)
+
+    if state is acc.Access.STRANGER:
+        await handle_introduction(m, lang)
+        return
+
+    if state is not acc.Access.ALLOWED:
+        await m.answer(texts.no_access(state.value, lang))
+        return
+
+    # Знакомый агент: пока фиксация из лички не сделана, отправляем в чат.
     if llm.prefilter(m.text or ""):
         await m.answer(texts.t(lang, "dm_use_group"))
 
@@ -3076,6 +3091,88 @@ async def allowed_to_look_up(m: Message) -> bool:
                       chat_lang(m.chat.id, m.text or ""))
     await m.reply(texts.no_access(state.value, lang))
     return False
+
+
+# ==========================================================================
+# Частные агенты: заявка и решение владельца
+# ==========================================================================
+
+async def handle_introduction(m: Message, lang: str) -> None:
+    """
+    Незнакомый человек написал в личку.
+
+    Похоже на имя — принимаем заявку и показываем её владельцу.
+    Не похоже — объясняем, что делать, и ничего не создаём: иначе
+    владелец получит карточку с «привет» и перестанет их читать.
+    """
+    text = (m.text or "").strip()
+    if not pag.looks_like_name(text):
+        await m.answer(pag.ASK_INTRO.get(lang, pag.ASK_INTRO["ru"]))
+        return
+
+    name = pag.clean_name(text)
+    db.upsert_agent(m.from_user.id, m.from_user.username,
+                    m.from_user.full_name)
+    db.set_agent_status(m.from_user.id, "pending", intro_name=name)
+    db.set_agent_field(m.from_user.id, lang=lang, dm_open=1)
+
+    await m.answer(pag.APPLIED.get(lang, pag.APPLIED["ru"]).format(
+        name=texts.esc(name)))
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Принять",
+                             callback_data=f"pa:ok:{m.from_user.id}"),
+        InlineKeyboardButton(text="🚫 Отказать",
+                             callback_data=f"pa:no:{m.from_user.id}"),
+    ]])
+    card = pag.application_card(name, m.from_user.username, m.from_user.id)
+    for uid in _who_to_tell():
+        try:
+            await bot.send_message(uid, card, reply_markup=kb)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Не смог показать заявку %s: %s", uid, e)
+
+
+@dp.callback_query(F.data.startswith("pa:"))
+async def cb_private_agent(c: CallbackQuery) -> None:
+    """Владелец принял или отклонил частника."""
+    if not c.from_user or not has_menu(c.from_user.id):
+        await c.answer("Недоступно", show_alert=True)
+        return
+
+    _, action, raw = c.data.split(":")
+    uid = int(raw)
+    agent = db.get_agent(uid)
+    if agent is None:
+        await c.answer("Заявка не найдена", show_alert=True)
+        return
+
+    lang = agent_lang(agent)
+    name = agent["intro_name"] or agent["display_name"] or str(uid)
+
+    if action == "ok":
+        # Частник заводится обычным агентством с пометкой: тогда ниже
+        # по течению — CRM, статистика, разрезы — ничего не меняется.
+        aid = db.create_private_agency(name)
+        db.upsert_agent(uid, agent["username"], agent["display_name"],
+                        agency_id=aid)
+        db.set_agent_status(uid, "active")
+        note, answer = pag.APPROVED, f"Принят: {name}"
+    else:
+        db.set_agent_status(uid, "rejected")
+        note, answer = pag.DECLINED, "Отказано"
+
+    try:
+        await bot.send_message(uid, note.get(lang, note["ru"]))
+    except Exception as e:  # noqa: BLE001
+        log.warning("Не смог сообщить решение агенту %s: %s", uid, e)
+
+    try:
+        await c.message.edit_text(
+            c.message.html_text + f"\n\n<b>— {answer}</b>")
+    except Exception:  # noqa: BLE001
+        pass
+    await c.answer(answer)
 
 
 dp.message.register(on_private_any, F.chat.type == "private")

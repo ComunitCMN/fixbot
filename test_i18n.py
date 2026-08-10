@@ -3,6 +3,8 @@
 import pytest
 
 import agencies as ag
+import inspect
+
 import i18n
 import texts
 from phones import normalize
@@ -171,3 +173,57 @@ def test_setup_texts_both_languages():
         assert "TEUS" in out
         assert texts.setup_done("TEUS", lang)
     assert "Is that right" in texts.setup_group("TEUS", i18n.EN)
+
+
+# ===================== язык человека, а не группы =====================
+
+def test_letters_are_counted_without_digits():
+    assert i18n.letters("+7 999 123-45-67") == 0
+    assert not i18n.has_letters("+7 999 123-45-**")
+    assert i18n.has_letters("Иван +7 999")
+
+
+def test_short_replies_do_not_rewrite_a_persons_language():
+    """Одно «ok» не должно переключить человека на английский навсегда."""
+    assert not i18n.confident("ok")
+    assert not i18n.confident("да")
+    assert i18n.confident("Зафиксируйте клиента")
+    assert i18n.confident("please register")
+
+
+def test_reply_follows_the_message_not_the_group():
+    """
+    Главное правило: отвечаем человеку, а не группе. Англоязычный агент
+    в русской группе должен получить английский ответ.
+    """
+    import bot as b
+
+    src = inspect.getsource(b.chat_lang)
+    # Определение по тексту должно стоять раньше привязки чата.
+    assert src.index("has_letters") < src.index("chat_lang:")
+
+
+def test_pinned_language_is_the_fallback_for_bare_numbers():
+    """Судить не по чему — тогда язык берётся из привязки группы."""
+    import bot as b
+
+    src = inspect.getsource(b.chat_lang)
+    tail = src.split("has_letters", 1)[1]
+    assert "chat_lang:" in tail and "normalize_lang" in tail
+
+
+def test_profile_language_comes_from_the_person():
+    """
+    В личку человеку пишем на его языке. Раньше туда записывался язык
+    группы — и англоязычный агент из русского чата получал уведомления
+    по-русски.
+    """
+    import bot as b
+
+    src = inspect.getsource(b.on_message)
+    line = [ln for ln in src.splitlines() if "set_agent_field" in ln][0]
+    assert "i18n.detect(text" in line, line
+
+    # Обновляем только на достаточно длинных сообщениях.
+    head = src.split("set_agent_field", 1)[0]
+    assert "i18n.confident(text)" in head[-400:]

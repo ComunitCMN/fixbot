@@ -51,3 +51,26 @@ def detect_many(texts: list[str], default: str = RU) -> str:
 def normalize_lang(value: str | None, fallback: str = RU) -> str:
     v = (value or "").strip().lower()[:2]
     return v if v in SUPPORTED else fallback
+
+
+#: Столько букв нужно, чтобы менять язык личных уведомлений человека.
+#: Одного «ok» мало: русскоязычный агент, ответивший коротко на латинице,
+#: не должен из-за этого начать получать уведомления по-английски.
+MIN_LETTERS_FOR_PROFILE = 6
+
+
+def letters(text: str) -> int:
+    """Сколько в тексте букв. Цифры и знаки не в счёт."""
+    if not text:
+        return 0
+    return len(_CYRILLIC.findall(text)) + len(_LATIN.findall(text))
+
+
+def has_letters(text: str) -> bool:
+    """Есть ли по чему судить о языке. «+7 999 123-45-67» — нет."""
+    return letters(text) > 0
+
+
+def confident(text: str) -> bool:
+    """Достаточно ли текста, чтобы запомнить язык человека надолго."""
+    return letters(text) >= MIN_LETTERS_FOR_PROFILE

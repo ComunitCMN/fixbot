@@ -129,17 +129,24 @@ def service_paused() -> bool:
 
 def chat_lang(chat_id: int | None, text: str = "") -> str:
     """
-    Язык ответа.
+    Язык ответа — язык самого сообщения.
 
-    По умолчанию — язык самого сообщения: в смешанной группе русскому
-    агенту ответим по-русски, англоязычному по-английски. Если язык
-    чата прибит командой /lang, она главнее.
+    В смешанной группе русскому агенту отвечаем по-русски, англоязычному
+    по-английски, даже если группа помечена русской. Отвечаем-то мы
+    человеку, а не группе.
+
+    Привязка чата — запас на случай, когда судить не по чему: сообщение
+    из одних цифр, «+7 999 123-45-67». Раньше привязка стояла первой
+    и перебивала всё, из-за чего англоязычный агент в русской группе
+    получал ответы по-русски.
     """
+    if i18n.has_letters(text):
+        return i18n.detect(text, cfg.default_lang)
     if chat_id is not None:
         pinned = db.get_meta(f"chat_lang:{chat_id}")
         if pinned:
             return i18n.normalize_lang(pinned, cfg.default_lang)
-    return i18n.detect(text, cfg.default_lang)
+    return cfg.default_lang
 
 
 #: Последние сообщения каждого автора: (chat_id, user_id) → [(время, текст)].
@@ -618,8 +625,12 @@ async def on_message(m: Message) -> None:
 
     log.info("Фиксация от %s в «%s»: %s", author, m.chat.title, fx.client_name)
     db.upsert_agent(m.from_user.id, m.from_user.username, author)
-    # Язык рабочих сообщений — он же язык личных уведомлений.
-    db.set_agent_field(m.from_user.id, lang=lang)
+    # Язык личных уведомлений — язык, на котором пишет сам человек,
+    # а не язык группы: в русском чате может работать англоязычный агент.
+    # Короткие реплики не в счёт, иначе одно «ok» переключило бы человека
+    # на английский навсегда.
+    if i18n.confident(text):
+        db.set_agent_field(m.from_user.id, lang=i18n.detect(text, lang))
 
     # ---------- телефон ----------
     region = chat_region(m.chat.id)

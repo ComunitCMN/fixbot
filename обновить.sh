@@ -27,6 +27,17 @@ cd /opt/fixbot/app || { echo "Нет /opt/fixbot/app"; exit 1; }
 SUDO=sudo
 [ "$(id -u)" -eq 0 ] && SUDO=""
 
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "❌  Git не может работать с /opt/fixbot/app."
+    echo
+    echo "    Обычно это значит, что папка принадлежит пользователю fixbot,"
+    echo "    а вы зашли под root — git считает такое подозрительным."
+    echo "    Выполните один раз и запустите снова:"
+    echo
+    echo "        git config --global --add safe.directory /opt/fixbot/app"
+    exit 1
+fi
+
 PY=./venv/bin/python
 UNITS=(fixbot-operator)
 for d in /opt/fixbot/clients/*/; do

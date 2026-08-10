@@ -103,6 +103,21 @@ def test_update_notices_a_traceback_in_the_log():
     assert "Traceback" in src and "NameError" in src
 
 
+@pytest.mark.parametrize("script", ["обновить.sh", "откатить.sh"])
+def test_git_refusal_is_explained(script):
+    """
+    Папка на сервере принадлежит fixbot, заходят под root — git объявляет
+    репозиторий подозрительным и отказывается работать. Скрипт при этом
+    молча доходил до конца, ничего не сделав: худший исход из возможных,
+    потому что выглядит как успех. Проверяем доступность git до всего
+    остального и объясняем, что выполнить.
+    """
+    src = текст(script)
+    assert "rev-parse --git-dir" in src
+    assert "safe.directory" in src
+    assert src.index("rev-parse --git-dir") < src.index("git fetch")
+
+
 def test_update_refuses_when_the_server_was_edited_by_hand():
     """
     Правки руками на сервере — прямой запрет в CLAUDE.md. Молча затирать

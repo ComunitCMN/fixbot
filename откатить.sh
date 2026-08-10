@@ -19,6 +19,17 @@ SUDO=sudo
 [ "$(id -u)" -eq 0 ] && SUDO=""
 PY=./venv/bin/python
 
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "❌  Git не может работать с /opt/fixbot/app."
+    echo
+    echo "    Обычно это значит, что папка принадлежит пользователю fixbot,"
+    echo "    а вы зашли под root — git считает такое подозрительным."
+    echo "    Выполните один раз и запустите снова:"
+    echo
+    echo "        git config --global --add safe.directory /opt/fixbot/app"
+    exit 1
+fi
+
 git fetch --all --tags -q 2>/dev/null
 
 if [ "${1:-}" = "--список" ] || [ "${1:-}" = "--list" ]; then

@@ -18,23 +18,44 @@
 #
 # Худший исход этого скрипта — «ничего не изменилось». Не «боты лежат».
 #
+# ## Два разных пользователя
+#
+# Заходят на сервер под root, а код, venv и ключ к GitHub принадлежат
+# пользователю fixbot. Поэтому работа делится:
+#   git, pip, тесты  — от имени владельца папки (иначе «Permission
+#                      denied (publickey)» и root-овские файлы в venv);
+#   systemctl        — от root.
+# Флаг -H у sudo обязателен: без него ssh пойдёт искать ключ в /root/.ssh,
+# где его нет.
+#
 # Имена переменных латиницей намеренно: кириллические bash не принимает
 # вовсе — `ИМЯ=значение` он читает как попытку запустить программу.
 
 set -u
-cd /opt/fixbot/app || { echo "Нет /opt/fixbot/app"; exit 1; }
+APP=/opt/fixbot/app
+cd "$APP" || { echo "Нет $APP"; exit 1; }
 
 SUDO=sudo
 [ "$(id -u)" -eq 0 ] && SUDO=""
 
-if ! git rev-parse --git-dir > /dev/null 2>&1; then
-    echo "❌  Git не может работать с /opt/fixbot/app."
+OWNER=$(stat -c '%U' "$APP/.git" 2>/dev/null)
+ME=$(id -un)
+
+as_owner() {
+    if [ -z "$OWNER" ] || [ "$OWNER" = "$ME" ]; then
+        "$@"
+    else
+        sudo -u "$OWNER" -H "$@"
+    fi
+}
+
+if ! as_owner git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "❌  Git не может работать с $APP."
     echo
-    echo "    Обычно это значит, что папка принадлежит пользователю fixbot,"
-    echo "    а вы зашли под root — git считает такое подозрительным."
-    echo "    Выполните один раз и запустите снова:"
+    echo "    Папка принадлежит пользователю ${OWNER:-неизвестно}, запущено от $ME."
+    echo "    Если это не ошибка, выполните один раз:"
     echo
-    echo "        git config --global --add safe.directory /opt/fixbot/app"
+    echo "        git config --global --add safe.directory $APP"
     exit 1
 fi
 
@@ -74,14 +95,14 @@ crash_in_logs() {
     return 1
 }
 
-WAS=$(git rev-parse HEAD)
-WAS_TEXT=$(git log -1 --format='%s')
+WAS=$(as_owner git rev-parse HEAD)
+WAS_TEXT=$(as_owner git log -1 --format='%s')
 
 rollback() {
     echo
     echo "↩️  ВОЗВРАЩАЮ КАК БЫЛО: $WAS_TEXT"
-    git reset --hard "$WAS" -q
-    $PY -m pip install -q -r requirements.txt 2>/dev/null
+    as_owner git reset --hard "$WAS" -q
+    as_owner $PY -m pip install -q -r requirements.txt 2>/dev/null
     restart_all
     sleep 15
     if dead_units > /dev/null; then
@@ -93,33 +114,38 @@ rollback() {
     exit 1
 }
 
+echo "Папка принадлежит:  $OWNER   (запущено от $ME)"
 echo "Сейчас на сервере:  $WAS_TEXT"
 echo "Службы:             ${UNITS[*]}"
 echo
 
 # --- 1. новый код -----------------------------------------------------
 echo "Забираю код…"
-git fetch --all --tags -q
-if ! git pull --ff-only -q; then
-    echo "❌  Не смог обновиться начисто. Похоже, на сервере правили руками."
-    echo "    Посмотреть что:  git status"
+if ! as_owner git fetch --all --tags -q; then
+    echo "❌  Не смог достучаться до GitHub от имени $OWNER."
+    echo "    Проверить ключ:  sudo -u $OWNER -H ssh -T git@github.com"
     exit 1
 fi
-NOW=$(git rev-parse HEAD)
+if ! as_owner git pull --ff-only -q; then
+    echo "❌  Не смог обновиться начисто. Похоже, на сервере правили руками."
+    echo "    Посмотреть что:  sudo -u $OWNER -H git status"
+    exit 1
+fi
+NOW=$(as_owner git rev-parse HEAD)
 
 if [ "$WAS" = "$NOW" ]; then
     echo "Нового кода нет — сервер и так свежий. Ничего не делаю."
     exit 0
 fi
-echo "Приехало:  $(git log -1 --format='%s')"
+echo "Приехало:  $(as_owner git log -1 --format='%s')"
 
 # --- 2. зависимости ---------------------------------------------------
 echo "Ставлю зависимости…"
-$PY -m pip install -q -r requirements.txt || rollback
+as_owner $PY -m pip install -q -r requirements.txt || rollback
 
 # --- 3. тесты ДО перезапуска -----------------------------------------
 echo "Проверяю тестами…"
-if ! FIXBOT_TESTING=1 $PY -m pytest -q > /tmp/fixbot-deploy.txt 2>&1; then
+if ! as_owner env FIXBOT_TESTING=1 $PY -m pytest -q --tb=line > /tmp/fixbot-deploy.txt 2>&1; then
     grep -E "^(FAILED|ERROR)" /tmp/fixbot-deploy.txt | head -15
     tail -3 /tmp/fixbot-deploy.txt
     echo

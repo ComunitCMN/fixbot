@@ -104,6 +104,47 @@ def test_update_notices_a_traceback_in_the_log():
 
 
 @pytest.mark.parametrize("script", ["обновить.sh", "откатить.sh"])
+def test_git_runs_as_the_owner_of_the_repository(script):
+    """
+    На сервере заходят под root, а код и ключ к GitHub принадлежат
+    пользователю fixbot. Root получает «Permission denied (publickey)»
+    и «dubious ownership»: обновиться он не может физически.
+    Поэтому git, pip и тесты идут от владельца папки.
+    """
+    src = код(script)
+    assert "as_owner" in src
+    assert "stat -c '%U'" in src
+    for cmd in ("git fetch", "git rev-parse HEAD", "git reset --hard",
+                "pip install"):
+        if cmd in src:
+            for line in src.splitlines():
+                if cmd in line and "as_owner" not in line:
+                    assert False, f"{script}: {line.strip()} — без as_owner"
+
+
+@pytest.mark.parametrize("script", ["обновить.sh", "откатить.sh"])
+def test_owner_keeps_his_own_home(script):
+    """
+    Без -H у sudo домашняя папка остаётся root-овской, ssh идёт искать
+    ключ в /root/.ssh — а он лежит в /home/fixbot/.ssh. Внешне это
+    выглядит как «git молчит и ничего не забирает».
+    """
+    src = код(script)
+    assert 'sudo -u "$OWNER" -H' in src
+
+
+def test_update_restarts_services_as_root_not_as_owner():
+    """
+    Наоборот тоже нельзя: у fixbot нет права трогать fixbot-operator —
+    в sudoers разрешён только шаблон fixbot@*.
+    """
+    src = код("обновить.sh")
+    for line in src.splitlines():
+        if "systemctl restart" in line:
+            assert "as_owner" not in line, line.strip()
+
+
+@pytest.mark.parametrize("script", ["обновить.sh", "откатить.sh"])
 def test_git_refusal_is_explained(script):
     """
     Папка на сервере принадлежит fixbot, заходят под root — git объявляет

@@ -180,14 +180,20 @@ def test_quote_escapes_dangerous_characters():
     assert pv.quote(None) == '""'
 
 
-def test_render_env_starts_in_observation_mode():
+def test_new_client_starts_working_right_away():
     """
-    Новый клиент поднимается в режиме наблюдения: сначала смотрим, где
-    бот промахивается на его формулировках, и только потом пишем в CRM.
+    Новый клиент сразу в бою.
+
+    Сначала неделя наблюдения была по умолчанию, но владелец её отменил,
+    и основание есть: в CRM ничего не попадает без нажатия агента.
+    Наблюдение защищало от шага, которого не существует, — а платить
+    за него приходилось неделей ручной сверки.
     """
     text = pv.render_env(
         developer="Р", bot_token="1", subdomain="s", amo_token="t",
         operator_ids={1}, owner_ids={2}, db_path="/x/y.db")
+    assert "DRY_RUN=0" in text
+    # Способ включить наблюдение вручную должен остаться описанным.
     assert "DRY_RUN=1" in text
 
 

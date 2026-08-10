@@ -582,6 +582,11 @@ async def on_message(m: Message) -> None:
     if await try_agency_reply(m):
         return
 
+    # Запоминаем чат: список групп у Telegram не спросить, а настраивать
+    # язык и агентство надо на чём-то.
+    if db.see_chat(m.chat.id, m.chat.title):
+        _announce_chat(m.chat.id, m.chat.title)
+
     author = author_name(m)
     lang = chat_lang(m.chat.id, text)
     uid = m.from_user.id if m.from_user else 0
@@ -1926,7 +1931,8 @@ async def cb_menu(c: CallbackQuery) -> None:
         await show(mn.HELP_TEXT)
 
     elif section == "chats":
-        await show(mn.chats_text(db.connected_chats()))
+        rows = _chat_rows()
+        await show(mn.chats_overview(rows), mn.back_kb(mn.chats_kb(rows)))
 
     elif section == "agencies":
         await show(mn.agencies_text(db.list_agencies()))
@@ -2773,6 +2779,140 @@ async def try_billing_start_reply(m: Message) -> bool:
     return True
 
 
+def _chat_rows() -> list[dict]:
+    """Группы для меню: название, агентство, язык, признак админа."""
+    names = {a["id"]: a["name"] for a in db.list_agencies()}
+    out = []
+    for r in db.list_chats():
+        aid = db.chat_agency_id(r["chat_id"])
+        out.append({
+            "chat_id": r["chat_id"],
+            "title": r["title"],
+            "agency": names.get(aid) if aid else None,
+            "lang": db.get_meta(f"chat_lang:{r['chat_id']}") or "",
+            "messages": r["messages"],
+            "is_admin": None if r["is_admin"] is None else bool(r["is_admin"]),
+        })
+    return out
+
+
+@dp.callback_query(F.data.startswith("ch:"))
+async def cb_chats(c: CallbackQuery) -> None:
+    """Настройка группы: язык и агентство."""
+    if not c.from_user or not has_menu(c.from_user.id):
+        await c.answer("Недоступно", show_alert=True)
+        return
+
+    parts = c.data.split(":")
+    action, chat_id = parts[1], int(parts[2])
+    row = next((r for r in _chat_rows() if r["chat_id"] == chat_id), None)
+    if row is None:
+        await c.answer("Группа не найдена", show_alert=True)
+        return
+
+    if action == "lang":
+        code = parts[3]
+        # «auto» — снять привязку, а не записать пустую строку языком:
+        # дальше её читает i18n, и пустое значение он понимает как «сам».
+        db.set_meta(f"chat_lang:{chat_id}", "" if code == "auto" else code)
+        row["lang"] = "" if code == "auto" else code
+
+    if action == "agency":
+        agencies = db.list_agencies()
+        if not agencies:
+            await c.answer("Справочник агентств пуст", show_alert=True)
+            return
+        kb = [[InlineKeyboardButton(
+            text=a["name"], callback_data=f"chset:{chat_id}:{a['id']}")]
+            for a in agencies[:30]]
+        kb.append([InlineKeyboardButton(text="← Назад",
+                                        callback_data=f"ch:open:{chat_id}")])
+        await c.message.edit_text(
+            f"🏢 За каким агентством закрепить "
+            f"<b>{texts.esc(row['title'] or chat_id)}</b>?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        await c.answer()
+        return
+
+    await c.message.edit_text(
+        mn.chat_card(row),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=mn.chat_kb(chat_id, row["lang"])))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("chset:"))
+async def cb_chat_set_agency(c: CallbackQuery) -> None:
+    if not c.from_user or not has_menu(c.from_user.id):
+        await c.answer("Недоступно", show_alert=True)
+        return
+    _, chat_id, agency_id = c.data.split(":")
+    db.set_meta(f"chat_agency:{chat_id}", agency_id)
+
+    row = next((r for r in _chat_rows() if r["chat_id"] == int(chat_id)), None)
+    if row:
+        await c.message.edit_text(
+            mn.chat_card(row),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=mn.chat_kb(int(chat_id), row["lang"])))
+    await c.answer("Закреплено")
+
+
+# --------------------------------------------------------------------------
+# Новые группы
+#
+# Бот не может спросить у Telegram список чатов, где он состоит: он узнаёт
+# о группе только когда оттуда придёт сообщение. Поэтому о каждой впервые
+# замеченной группе говорим владельцу — один раз и в личку.
+#
+# В саму группу бот не пишет. Там работают агенты, и объявления о
+# собственной настройке им ни к чему.
+# --------------------------------------------------------------------------
+
+#: Очередь, а не прямая отправка: при переезде бота, который уже сидит
+#: в семидесяти чатах, все они «откроются» почти одновременно, и Telegram
+#: оборвёт поток сообщений в одну личку.
+_new_chats: "asyncio.Queue[tuple[int, str | None]]" = asyncio.Queue()
+
+CHAT_ALERT_PAUSE = 1.5
+
+
+def _announce_chat(chat_id: int, title: str | None) -> None:
+    if db.chat_agency_id(chat_id):
+        return              # уже закреплена — говорить не о чем
+    _new_chats.put_nowait((chat_id, title))
+
+
+def _who_to_tell() -> list[int]:
+    """Владельцы и оператор — это их группы и их справочник агентств."""
+    return sorted(set(cfg.owner_ids) | set(cfg.operator_ids)
+                  | set(cfg.admin_ids))
+
+
+async def chat_alert_loop() -> None:
+    while True:
+        chat_id, title = await _new_chats.get()
+        try:
+            known = [{"name": a["name"], "norm": a["norm_name"],
+                      "agency_id": a["id"]} for a in db.list_agencies()]
+            guess = ag.agency_from_chat_title(
+                title or "", cfg.developer_name, known)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="⚙️ Настроить",
+                                     callback_data=f"ch:open:{chat_id}")]])
+            for uid in _who_to_tell():
+                try:
+                    await bot.send_message(
+                        uid, mn.new_chat_alert(title, chat_id, guess),
+                        reply_markup=kb)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("Не смог сказать %s о группе %s: %s",
+                              uid, chat_id, e)
+        except Exception:  # noqa: BLE001
+            log.exception("Не смог сообщить о новой группе %s", chat_id)
+        await asyncio.sleep(CHAT_ALERT_PAUSE)
+
+
 dp.message.register(on_private_any, F.chat.type == "private")
 
 
@@ -2793,6 +2933,7 @@ async def main() -> None:
     except Exception:  # noqa: BLE001
         log.exception("не смог узнать имя бота — кнопка подписки не появится")
 
+    asyncio.create_task(chat_alert_loop())
     asyncio.create_task(sync_loop())
     asyncio.create_task(expire_loop())
     asyncio.create_task(status_loop())
@@ -2807,3 +2948,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+

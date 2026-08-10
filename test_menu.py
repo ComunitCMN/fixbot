@@ -233,3 +233,125 @@ def test_no_menu_does_not_scold():
     for lang in ("ru", "en"):
         low = texts.t(lang, "no_menu").lower()
         assert not any(w in low for w in harsh), low
+
+
+# ===================== панель групп =====================
+
+def test_chats_are_remembered_when_seen(tmp_path):
+    """
+    Список чатов у Telegram не спросить: бот узнаёт о группе только когда
+    оттуда приходит сообщение. Значит запоминать должен сам.
+    """
+    db = Db(tmp_path / "c1.db")
+    db.see_chat(-100, "TEUS & BREIG", is_admin=True)
+    db.see_chat(-100, "TEUS и BREIG")          # группу переименовали
+
+    row = db.get_chat(-100)
+    assert row["title"] == "TEUS и BREIG"      # новое название победило
+    assert row["is_admin"] == 1                # признак не потерялся
+    assert row["messages"] == 2
+
+
+def test_chat_list_is_sorted_by_recency(tmp_path):
+    db = Db(tmp_path / "c2.db")
+    db.see_chat(-1, "старый")
+    db.conn.execute("UPDATE chats SET last_seen=1 WHERE chat_id=-1")
+    db.conn.commit()
+    db.see_chat(-2, "свежий")
+    assert [r["chat_id"] for r in db.list_chats()] == [-2, -1]
+
+
+def test_chat_card_warns_when_bot_is_not_admin():
+    """
+    Без прав администратора и с включённой приватностью бот видит не всё —
+    человек должен понимать, почему фиксации проходят через раз.
+    """
+    r = {"chat_id": -1, "title": "Bali", "agency": None, "lang": "",
+         "messages": 7, "is_admin": False}
+    assert "не администратор" in mn.chat_card(r)
+
+    r["is_admin"] = True
+    assert "не администратор" not in mn.chat_card(r)
+
+
+def test_language_buttons_mark_the_current_choice():
+    kb = mn.chat_kb(-1, "en")
+    labels = [b.text for line in kb for b in line]
+    assert any(t.startswith("● ") and "English" in t for t in labels)
+    assert not any(t.startswith("● ") and "Русский" in t for t in labels)
+
+
+def test_auto_language_is_the_empty_value():
+    """
+    «По сообщениям» — это снятая привязка, а не язык с пустым кодом:
+    дальше значение читает определитель языка.
+    """
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b.cb_chats)
+    assert '"" if code == "auto" else code' in src
+
+
+def test_empty_list_explains_why(tmp_path):
+    out = mn.chats_overview([])
+    assert "первое сообщение" in out
+    assert "не администратор" in out
+
+
+def test_group_messages_are_recorded():
+    import inspect
+
+    import bot as b
+
+    assert "db.see_chat(" in inspect.getsource(b.on_message)
+
+
+def test_first_sighting_is_reported_once(tmp_path):
+    """Про новую группу говорим один раз, а не на каждое сообщение."""
+    db = Db(tmp_path / "c3.db")
+    assert db.see_chat(-100, "TEUS") is True
+    assert db.see_chat(-100, "TEUS") is False
+    assert db.see_chat(-200, "ERA") is True
+
+
+def test_bound_chats_are_not_announced():
+    """Если агентство уже закреплено, сообщать не о чем."""
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b._announce_chat)
+    assert "chat_agency_id" in src and "return" in src
+
+
+def test_alerts_go_through_a_queue():
+    """
+    У бота, который уже сидит в семидесяти чатах, все они «откроются»
+    почти одновременно — Telegram оборвёт поток сообщений в одну личку.
+    """
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b.chat_alert_loop)
+    assert "_new_chats.get()" in src
+    assert "asyncio.sleep(CHAT_ALERT_PAUSE)" in src
+    assert b.CHAT_ALERT_PAUSE >= 1
+
+
+def test_alert_does_not_go_into_the_group():
+    """В рабочие чаты агентств бот со своей настройкой не лезет."""
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b.chat_alert_loop)
+    assert "chat_id," not in src.split("send_message(", 1)[1][:40]
+
+
+def test_alert_text_names_the_group():
+    out = mn.new_chat_alert("TEUS & BREIG", -100, "TEUS")
+    assert "TEUS & BREIG" in out and "TEUS" in out
+    assert "{" not in out

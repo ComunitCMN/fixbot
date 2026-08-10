@@ -216,6 +216,20 @@ CREATE TABLE IF NOT EXISTS meta (
     PRIMARY KEY (account_id, key)
 );
 
+-- Чаты, где бота видели. Список групп у Telegram не спросить: бот узнаёт
+-- о чате только когда оттуда приходит сообщение. Поэтому запоминаем сами —
+-- иначе настроить язык и агентство было бы не на чем.
+CREATE TABLE IF NOT EXISTS chats (
+    account_id INTEGER NOT NULL,
+    chat_id    INTEGER NOT NULL,
+    title      TEXT,
+    is_admin   INTEGER,
+    messages   INTEGER NOT NULL DEFAULT 0,
+    first_seen INTEGER,
+    last_seen  INTEGER,
+    PRIMARY KEY (account_id, chat_id)
+);
+
 -- Обслуживание клиентов. Живёт ТОЛЬКО в базе оператора: биллинг ведётся
 -- из его бота, а базы клиентов трогаются лишь на чтение — иначе у файла
 -- окажется два хозяина.
@@ -1404,3 +1418,45 @@ class Db:
         return list(self.conn.execute(
             "SELECT * FROM billing_periods WHERE slug=?"
             " ORDER BY due DESC LIMIT ?", (slug, limit)))
+
+    # ================= чаты =================
+
+    def see_chat(self, chat_id: int, title: str | None = None,
+                 is_admin: bool | None = None) -> bool:
+        """
+        Отметить, что бот видел этот чат. Возвращает True, если впервые.
+
+        Названия групп меняются, поэтому обновляем каждый раз. Счётчик
+        сообщений нужен, чтобы в списке живые чаты были отличимы от
+        случайно задетых. Признак «впервые» — чтобы сказать владельцу
+        про новую группу ровно один раз, а не при каждом сообщении.
+        """
+        first = self.get_chat(chat_id) is None
+        now = int(time.time())
+        flag = None if is_admin is None else int(is_admin)
+        self.conn.execute(
+            "INSERT INTO chats (account_id, chat_id, title, is_admin,"
+            " messages, first_seen, last_seen) VALUES (?,?,?,?,1,?,?)"
+            " ON CONFLICT(account_id, chat_id) DO UPDATE SET"
+            "  title=COALESCE(excluded.title, chats.title),"
+            "  is_admin=COALESCE(?, chats.is_admin),"
+            "  messages=chats.messages + 1,"
+            "  last_seen=excluded.last_seen",
+            (self.account_id, chat_id, title, flag, now, now, flag),
+        )
+        self.conn.commit()
+        return first
+
+    def get_chat(self, chat_id: int):
+        return self.conn.execute(
+            "SELECT * FROM chats WHERE account_id=? AND chat_id=?",
+            (self.account_id, chat_id)).fetchone()
+
+    def list_chats(self, limit: int = 200) -> list:
+        return list(self.conn.execute(
+            "SELECT * FROM chats WHERE account_id=?"
+            " ORDER BY last_seen DESC LIMIT ?", (self.account_id, limit)))
+
+    def chat_agency_id(self, chat_id: int) -> int | None:
+        raw = self.get_meta(f"chat_agency:{chat_id}")
+        return int(raw) if raw and raw.isdigit() else None

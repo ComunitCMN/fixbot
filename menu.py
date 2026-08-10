@@ -224,3 +224,94 @@ HELP_TEXT = """❓ <b>Как это работает</b>
 <b>Подключить новую группу.</b> Добавьте бота в чат с агентством и
 сделайте администратором — дальше он спросит, за каким агентством
 закрепить чат."""
+
+
+# ===================== группы =====================
+
+FLAG = {"ru": "🇷🇺", "en": "🇬🇧", "": "🌐"}
+
+
+def chats_overview(rows: list[dict]) -> str:
+    """
+    Список групп, где бота видели.
+
+    `rows` — [{chat_id, title, agency, lang, messages, is_admin}].
+    """
+    if not rows:
+        return ("💬 <b>Группы</b>\n\n"
+                "Бот пока не видел ни одной группы.\n\n"
+                "Telegram не позволяет спросить список чатов — бот узнаёт "
+                "о группе, когда оттуда приходит первое сообщение. "
+                "Группы появятся здесь сами по мере переписки.\n\n"
+                "Если какая-то не появляется совсем — скорее всего бот там "
+                "не администратор.")
+
+    lines = ["💬 <b>Группы</b>", ""]
+    for r in rows[:40]:
+        mark = "🤝" if r["agency"] else "❓"
+        lines.append(f"{mark} {FLAG.get(r['lang'] or '', '🌐')} "
+                     f"<b>{r['title'] or r['chat_id']}</b>"
+                     + (f" — {r['agency']}" if r["agency"] else ""))
+    if len(rows) > 40:
+        lines.append(f"\n…и ещё {len(rows) - 40}")
+    lines += ["", "🤝 агентство закреплено · ❓ не закреплено",
+              "🌐 язык по сообщениям · 🇷🇺 🇬🇧 задан вручную"]
+    return "\n".join(lines)
+
+
+def chats_kb(rows: list[dict]) -> list:
+    from aiogram.types import InlineKeyboardButton
+
+    return [[InlineKeyboardButton(
+        text=f"{'🤝' if r['agency'] else '❓'} "
+             f"{FLAG.get(r['lang'] or '', '🌐')} "
+             f"{(r['title'] or str(r['chat_id']))[:38]}",
+        callback_data=f"ch:open:{r['chat_id']}")] for r in rows[:40]]
+
+
+def chat_card(r: dict) -> str:
+    lang = {"ru": "русский", "en": "английский"}.get(
+        r["lang"] or "", "определяется по сообщениям")
+    return "\n".join([
+        f"💬 <b>{r['title'] or r['chat_id']}</b>", "",
+        f"Агентство: {r['agency'] or '❗️ не закреплено'}",
+        f"Язык ответов: {lang}",
+        f"Сообщений замечено: {r['messages']}",
+        "" if r.get("is_admin") is not False else
+        "\n⚠️ Бот здесь не администратор — часть сообщений он не увидит.",
+    ])
+
+
+def chat_kb(chat_id: int, lang: str) -> list:
+    from aiogram.types import InlineKeyboardButton
+
+    def mark(code: str) -> str:
+        return "● " if (lang or "") == code else ""
+
+    return [
+        [InlineKeyboardButton(text="🏢 Закрепить агентство",
+                              callback_data=f"ch:agency:{chat_id}")],
+        [InlineKeyboardButton(text=f"{mark('ru')}🇷🇺 Русский",
+                              callback_data=f"ch:lang:{chat_id}:ru"),
+         InlineKeyboardButton(text=f"{mark('en')}🇬🇧 English",
+                              callback_data=f"ch:lang:{chat_id}:en")],
+        [InlineKeyboardButton(text=f"{mark('')}🌐 По сообщениям",
+                              callback_data=f"ch:lang:{chat_id}:auto")],
+        [InlineKeyboardButton(text="← Группы", callback_data="m:chats")],
+    ]
+
+
+def new_chat_alert(title: str | None, chat_id: int, guess: str | None) -> str:
+    """
+    Сообщение владельцу о впервые замеченной группе.
+
+    Приходит один раз на группу. В чат бот при этом не пишет: там работают
+    агенты, и объявления о собственной настройке им ни к чему.
+    """
+    lines = [f"💬 <b>Замечена группа</b>\n",
+             f"<b>{title or chat_id}</b>", ""]
+    if guess:
+        lines.append(f"Похоже на агентство <b>{guess}</b> — по названию.")
+    lines.append("Закрепите агентство и язык, чтобы бот отвечал правильно "
+                 "и не спрашивал агентство у каждого.")
+    return "\n".join(lines)

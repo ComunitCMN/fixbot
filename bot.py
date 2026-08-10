@@ -37,6 +37,7 @@ from aiogram.types import (CallbackQuery, ChatMemberUpdated, ForceReply,
 import httpx
 import phonenumbers as pn
 
+import access as acc
 import agencies as ag
 import billing as bl
 import billing_run as blrun
@@ -564,6 +565,8 @@ async def cmd_lang(m: Message) -> None:
 @dp.message(Command("check"))
 async def cmd_check(m: Message) -> None:
     """Проверить номер, ничего не создавая: /check +7 999 123-45-**"""
+    if not await allowed_to_look_up(m):
+        return
     parts = (m.text or "").split(maxsplit=1)
     if len(parts) < 2:
         await m.reply("Формат: <code>/check +7 999 123-45-**</code>")
@@ -3035,6 +3038,44 @@ async def try_chat_agency_reply(m: Message) -> bool:
             InlineKeyboardButton(text="← К группе",
                                  callback_data=f"ch:open:{chat_id}")]]))
     return True
+
+
+# ==========================================================================
+# Кому бот отвечает по существу
+# ==========================================================================
+
+#: Счётчик проверок. В памяти: ограничение нужно на часы, переживать
+#: перезапуск ему незачем.
+_lookups = acc.LookupCounter()
+
+
+def access_of(user_id: int, chat_id: int | None = None) -> acc.Access:
+    return acc.decide(
+        has_menu=has_menu(user_id),
+        agent=dict(db.get_agent(user_id) or {}) or None,
+        lookups_last_hour=_lookups.count(user_id),
+        in_bound_chat=bool(chat_id and db.chat_agency_id(chat_id)))
+
+
+async def allowed_to_look_up(m: Message) -> bool:
+    """
+    Можно ли этому человеку узнать вердикт.
+
+    Вердикт «клиент у отдела продаж» — сведения о базе застройщика.
+    Раньше `/check` отвечал кому угодно: достаточно было узнать адрес
+    бота, а его знают агенты из десятков чатов.
+    """
+    if not m.from_user:
+        return False
+    state = access_of(m.from_user.id, m.chat.id)
+    if state is acc.Access.ALLOWED:
+        _lookups.add(m.from_user.id)
+        return True
+
+    lang = agent_lang(db.get_agent(m.from_user.id),
+                      chat_lang(m.chat.id, m.text or ""))
+    await m.reply(texts.no_access(state.value, lang))
+    return False
 
 
 dp.message.register(on_private_any, F.chat.type == "private")

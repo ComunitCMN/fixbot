@@ -860,3 +860,38 @@ def service_paused(lang: str = RU) -> str:
                 "Уточните у своего менеджера.")
     return ("⏸ Lookups are temporarily unavailable.\n"
             "Please check with your manager.")
+
+
+def no_access(kind: str, lang: str = RU) -> str:
+    """
+    Отказ тому, кого бот не знает.
+
+    Ни намёка на содержимое базы: есть клиент, нет клиента, много ли их —
+    посторонний не должен узнать даже этого. Поэтому текст один и тот же
+    для любого номера.
+    """
+    if kind == "too_many":
+        return ("⏳ Слишком много проверок подряд. Попробуйте через час."
+                if lang == RU else
+                "⏳ Too many lookups in a row. Please try again in an hour.")
+    if kind == "pending":
+        return ("⏳ Ваша заявка у застройщика на рассмотрении. "
+                "Как только её примут, я напишу."
+                if lang == RU else
+                "⏳ Your application is with the developer. "
+                "I'll message you as soon as it's approved.")
+    if kind == "rejected":
+        return ("Доступа к проверке у вас нет. "
+                "Уточните у своего менеджера."
+                if lang == RU else
+                "You don't have access to lookups. "
+                "Please check with your manager.")
+    return ("Проверка доступна агентам, работающим с застройщиком.\n\n"
+            "Если вы из агентства — напишите в рабочем чате, бот вас "
+            "запомнит. Если работаете сами — представьтесь: пришлите "
+            "имя и фамилию, я передам застройщику."
+            if lang == RU else
+            "Lookups are available to agents working with the developer.\n\n"
+            "If you're with an agency, write in your work chat and I'll "
+            "remember you. If you work on your own, introduce yourself: "
+            "send your name and I'll pass it to the developer.")

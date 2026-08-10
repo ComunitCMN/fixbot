@@ -51,16 +51,30 @@ class Access(Enum):
 
 
 def decide(*, has_menu: bool, agent: dict | None,
-           lookups_last_hour: int = 0) -> Access:
+           lookups_last_hour: int = 0, in_bound_chat: bool = False) -> Access:
     """
     Что позволено этому человеку.
 
     `agent` — строка из реестра агентов или None. Значение `status`:
     пусто или «active» — обычный агент, «pending» — ждёт подтверждения,
     «rejected» — отказано.
+
+    `in_bound_chat` — разговор идёт в группе, закреплённой за агентством.
+    Там пропуском служит сам чат: посторонний в рабочий чат агентства
+    не попадёт. Без этого `/check` перестал бы работать у агента, чьё
+    агентство ещё не записано в профиль.
     """
     if has_menu:
         return Access.ALLOWED          # оператор и владелец без ограничений
+
+    # Отказ владельца сильнее любого чата.
+    if agent is not None and (agent.get("status") or "").strip() == "rejected":
+        return Access.REJECTED
+
+    if in_bound_chat:
+        if lookups_last_hour >= LOOKUPS_PER_HOUR:
+            return Access.TOO_MANY
+        return Access.ALLOWED
 
     if agent is None:
         return Access.STRANGER

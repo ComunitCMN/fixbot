@@ -181,7 +181,8 @@ def test_setup_flow_exists_and_comes_before_wallet():
     """
     import bot as b
 
-    assert "bl:setup:" in inspect.getsource(b.cb_menu)
+    # Тело меню живёт в _cb_menu: cb_menu — обёртка, ловящая сбои.
+    assert "bl:setup:" in inspect.getsource(b._cb_menu)
 
     src = inspect.getsource(b.cb_billing)
     # Заведение обрабатывается до поиска строки в базе — её ещё нет.

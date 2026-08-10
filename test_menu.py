@@ -353,7 +353,8 @@ def test_alert_does_not_go_into_the_group():
 
 def test_alert_text_names_the_group():
     out = mn.new_chat_alert("TEUS & BREIG", -100, "TEUS")
-    assert "TEUS & BREIG" in out and "TEUS" in out
+    # Амперсанд экранирован — иначе Telegram не разберёт разметку.
+    assert "TEUS &amp; BREIG" in out and "TEUS" in out
     assert "{" not in out
 
 
@@ -444,3 +445,31 @@ def test_binding_creates_and_attaches(tmp_path):
 
     src = inspect.getsource(b._bind_agency)
     assert "create_agency" in src and "chat_agency:" in src
+
+
+def test_group_titles_are_escaped():
+    """
+    «BREIG & Noble» без экранирования ломает разметку: Telegram
+    отказывается разбирать сообщение, правка падает, и кнопка «крутится»
+    до таймаута.
+    """
+    rows = [{"chat_id": -1, "title": "BREIG & Noble", "agency": "A & B",
+             "lang": "", "messages": 1, "is_admin": True}]
+    for out in (mn.chats_overview(rows), mn.chat_card(rows[0]),
+                mn.new_chat_alert("Rich & BREIG", -1, "R & Co")):
+        assert "&amp;" in out
+        # Голого амперсанда остаться не должно.
+        assert " & " not in out
+
+
+def test_menu_always_answers_the_tap():
+    """
+    Обработчик обязан ответить на нажатие даже при сбое: иначе кнопка
+    висит в загрузке и выглядит как зависший бот.
+    """
+    import inspect
+
+    import bot as b
+
+    src = inspect.getsource(b.cb_menu)
+    assert "except Exception" in src and "c.answer(" in src

@@ -1922,6 +1922,16 @@ async def cb_menu(c: CallbackQuery) -> None:
     if not c.from_user or not has_menu(c.from_user.id):
         await c.answer("Недоступно", show_alert=True)
         return
+    try:
+        await _cb_menu(c)
+    except Exception as e:  # noqa: BLE001
+        # Без ответа кнопка «крутится» до таймаута, и человек решает, что
+        # бот завис. Лучше честно сказать, что не вышло.
+        log.exception("Меню: раздел %s", c.data)
+        await c.answer(f"Не открылось: {str(e)[:150]}", show_alert=True)
+
+
+async def _cb_menu(c: CallbackQuery) -> None:
 
     role = role_of(c.from_user.id)
     parts = c.data.split(":")

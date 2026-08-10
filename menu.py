@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+from texts import esc
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 OPERATOR = "operator"
@@ -258,9 +259,10 @@ def chats_overview(rows: list[dict]) -> str:
     lines = ["💬 <b>Группы</b>", ""]
     for r in rows[:40]:
         mark = "🤝" if r["agency"] else "❓"
+        title = esc(r["title"] or r["chat_id"])
         lines.append(f"{mark} {FLAG.get(r['lang'] or '', '🌐')} "
-                     f"<b>{r['title'] or r['chat_id']}</b>"
-                     + (f" — {r['agency']}" if r["agency"] else ""))
+                     f"<b>{title}</b>"
+                     + (f" — {esc(r['agency'])}" if r["agency"] else ""))
     if len(rows) > 40:
         lines.append(f"\n…и ещё {len(rows) - 40}")
     lines += ["", "🤝 агентство закреплено · ❓ не закреплено",
@@ -282,8 +284,8 @@ def chat_card(r: dict) -> str:
     lang = {"ru": "русский", "en": "английский"}.get(
         r["lang"] or "", "определяется по сообщениям")
     return "\n".join([
-        f"💬 <b>{r['title'] or r['chat_id']}</b>", "",
-        f"Агентство: {r['agency'] or '❗️ не закреплено'}",
+        f"💬 <b>{esc(r['title'] or r['chat_id'])}</b>", "",
+        f"Агентство: {esc(r['agency']) if r['agency'] else '❗️ не закреплено'}",
         f"Язык ответов: {lang}",
         f"Сообщений замечено: {r['messages']}",
         "" if r.get("is_admin") is not False else
@@ -318,9 +320,10 @@ def new_chat_alert(title: str | None, chat_id: int, guess: str | None) -> str:
     агенты, и объявления о собственной настройке им ни к чему.
     """
     lines = [f"💬 <b>Замечена группа</b>\n",
-             f"<b>{title or chat_id}</b>", ""]
+             f"<b>{esc(title or chat_id)}</b>", ""]
     if guess:
-        lines.append(f"Похоже на агентство <b>{guess}</b> — по названию.")
+        lines.append(f"Похоже на агентство <b>{esc(guess)}</b> — "
+                     f"по названию.")
     lines.append("Закрепите агентство и язык, чтобы бот отвечал правильно "
                  "и не спрашивал агентство у каждого.")
     return "\n".join(lines)

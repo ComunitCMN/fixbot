@@ -17,7 +17,17 @@ log = logging.getLogger(__name__)
 
 
 class AmoError(RuntimeError):
-    pass
+    """
+    Ошибка amoCRM. `status` — код ответа, если он был.
+
+    Код нужен, чтобы отличить «не понравилось поле» (4xx, повторить можно)
+    от сбоя на той стороне (5xx, повторять нельзя: сделка могла создаться,
+    и повтор положил бы в CRM вторую такую же).
+    """
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class AmoClient:
@@ -48,7 +58,10 @@ class AmoClient:
                 # Токен мог протухнуть между проверкой и запросом.
                 continue
             if r.status_code >= 400:
-                raise AmoError(f"{method} {url} → {r.status_code}: {r.text[:400]}")
+                raise AmoError(
+                    f"{method} {url} → {r.status_code}: {r.text[:400]}",
+                    status=r.status_code,
+                )
             if not r.content:
                 return {}
             return r.json()
@@ -87,6 +100,24 @@ class AmoClient:
             ]
             out.append({"id": p["id"], "name": p.get("name"),
                         "sort": p.get("sort"), "statuses": statuses})
+        return out
+
+    async def users(self) -> list[dict]:
+        """
+        Сотрудники застройщика — из них оператор выбирает ответственного
+        за новые фиксации.
+
+        Отключённых не показываем: сделку на них amoCRM не примет.
+        Но если признака в ответе нет вовсе, человека оставляем —
+        пустой список хуже лишней строки, настроить будет нечего.
+        """
+        out = []
+        async for u in self._paginate("/api/v4/users", "users"):
+            rights = u.get("rights") or {}
+            if rights.get("is_active") is False:
+                continue
+            out.append({"id": u["id"],
+                        "name": u.get("name") or u.get("email") or str(u["id"])})
         return out
 
     async def dump_contacts(self) -> list[dict]:
@@ -343,7 +374,8 @@ class AmoClient:
                           status_id: int | None = None,
                           tags: list[str] | None = None,
                           custom_fields: list[dict] | None = None,
-                          agent_contact_id: int | None = None) -> int:
+                          agent_contact_id: int | None = None,
+                          responsible_user_id: int | None = None) -> int:
         # Клиент идёт первым — amoCRM считает первый контакт основным.
         # Агент вторым, чтобы из сделки можно было перейти в его карточку.
         embedded: dict = {"contacts": [{"id": contact_id}]}
@@ -361,19 +393,39 @@ class AmoClient:
             lead["status_id"] = status_id
         if custom_fields:
             lead["custom_fields_values"] = custom_fields
+        if responsible_user_id:
+            lead["responsible_user_id"] = responsible_user_id
 
-        try:
-            data = await self._request("POST", "/api/v4/leads", json=[lead])
-        except AmoError as e:
-            # Этап может оказаться неподходящим — например служебным.
-            # Тогда создаём сделку без него: amoCRM сама поставит её
-            # в начало воронки. Терять фиксацию из-за этапа нельзя.
-            if "status_id" not in str(e) or "status_id" not in lead:
-                raise
-            log.warning("Этап %s не подошёл, создаю сделку без него",
-                        lead.get("status_id"))
-            lead.pop("status_id", None)
-            data = await self._request("POST", "/api/v4/leads", json=[lead])
+        # Два поля здесь необязательные, и на каждом amoCRM умеет
+        # заупрямиться: этап бывает служебным («Неразобранное» она через
+        # API не принимает), ответственный — уволенным или отключённым.
+        # Ни то, ни другое не стоит потерянной фиксации, поэтому спорное
+        # поле убираем и повторяем без него.
+        #
+        # Порядок важен: первым уходит ответственный. Без него сделка
+        # просто достанется владельцу токена — ровно как до этой
+        # доработки. Этап трогаем только следом: убрав его, мы меняем
+        # то, где сделка окажется в воронке, а это заметно оператору.
+        optional = ["responsible_user_id", "status_id"]
+        while True:
+            try:
+                data = await self._request("POST", "/api/v4/leads", json=[lead])
+                break
+            except AmoError as e:
+                drop = next((f for f in optional
+                             if f in lead and f in str(e)), None)
+                if (drop is None and "responsible_user_id" in lead
+                        and 400 <= (e.status or 0) < 500):
+                    # amoCRM не всегда называет поле, которое ей не
+                    # понравилось. Отказ разбирать по буквам нельзя,
+                    # а пожертвовать можно только ответственным.
+                    drop = "responsible_user_id"
+                if drop is None:
+                    raise
+                log.warning("amoCRM отклонила сделку (%s=%s), повторяю без "
+                            "этого поля: %s", drop, lead.get(drop), str(e)[:200])
+                lead.pop(drop, None)
+                optional.remove(drop)
         return data["_embedded"]["leads"][0]["id"]
 
     async def set_contact_phone(self, contact_id: int, phone: str,

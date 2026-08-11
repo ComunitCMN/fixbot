@@ -75,6 +75,10 @@ def tech_menu() -> InlineKeyboardMarkup:
     return back_kb([
         [InlineKeyboardButton(text="🔀 Разметка воронок",
                               callback_data="m:pipelines")],
+        # Рядом с воронками: обе настройки про одно и то же — куда падает
+        # новая сделка и на кого.
+        [InlineKeyboardButton(text="👤 Ответственный за фиксации",
+                              callback_data="m:resp")],
         [InlineKeyboardButton(text="🔄 Синхронизировать amoCRM",
                               callback_data="m:sync")],
         [InlineKeyboardButton(text="🩺 Состояние", callback_data="m:health")],

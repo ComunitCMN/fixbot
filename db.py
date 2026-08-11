@@ -1391,6 +1391,44 @@ class Db:
         )
         self.conn.commit()
 
+    # ================= ответственный за новые фиксации =================
+    #
+    # Одна настройка на клиента — рядом с отметкой «сюда кладём»: обе про
+    # одно и то же, куда падает сделка и на кого. Живёт в meta, а не
+    # отдельной колонкой: значение ровно одно на базу, и старым базам
+    # на сервере ничего досыпать не нужно.
+    #
+    # Правил «от такого агентства — такому менеджеру» здесь нет и не будет:
+    # это родная механика amoCRM, и вторая точка правды сломается при
+    # первом же расхождении.
+
+    RESPONSIBLE_ID = "responsible_user_id"
+    RESPONSIBLE_NAME = "responsible_user_name"
+
+    def set_responsible_user(self, user_id: int | None,
+                             name: str | None = None) -> None:
+        """
+        Выбрать менеджера или снять выбор (`None`).
+
+        Имя храним рядом с номером только ради показа: без него раздел
+        пришлось бы каждый раз тянуть из amoCRM, чтобы просто написать,
+        кто выбран.
+        """
+        self.set_meta(self.RESPONSIBLE_ID, str(user_id) if user_id else "")
+        self.set_meta(self.RESPONSIBLE_NAME, name or "")
+
+    def responsible_user_id(self) -> int | None:
+        """
+        Кого ставить ответственным на новую сделку. `None` — никого:
+        это не поломка, а сегодняшнее поведение, при котором amoCRM
+        сама вешает сделку на владельца токена.
+        """
+        raw = (self.get_meta(self.RESPONSIBLE_ID) or "").strip()
+        return int(raw) if raw.isdigit() and int(raw) else None
+
+    def responsible_user_name(self) -> str | None:
+        return (self.get_meta(self.RESPONSIBLE_NAME) or "").strip() or None
+
     # ================= обслуживание =================
     #
     # Только у оператора. Клиентские базы отсюда не трогаются вовсе:

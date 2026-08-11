@@ -456,6 +456,112 @@ def _pipelines_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+# ==========================================================================
+# Ответственный за новые фиксации
+# ==========================================================================
+#
+# Одна настройка на клиента, рядом с отметкой «сюда кладём». Выбор кнопкой
+# из списка amoCRM: искать числовой идентификатор пользователя в интерфейсе
+# CRM — верный способ получить молча неверную настройку.
+
+#: Кнопка «никого»: путь назад к прежнему поведению без правки базы.
+RESP_NOBODY = 0
+
+#: Сколько сотрудников показываем кнопками. Больше Telegram превращает
+#: в неудобную простыню, а у застройщика столько менеджеров не бывает.
+RESP_LIMIT = 40
+
+
+def _responsible_text(users: list[dict] | None = None) -> str:
+    current = db.responsible_user_id()
+    name = db.responsible_user_name()
+    if current and not name and users:
+        name = next((u["name"] for u in users if u["id"] == current), None)
+
+    lines = ["<b>Ответственный за новые фиксации</b>", ""]
+    if current:
+        lines.append(f"Сейчас: 👤 <b>{texts.esc(name or current)}</b>")
+    else:
+        lines.append("Сейчас: ответственный <b>не задан</b> — amoCRM "
+                     "поставит сделку на владельца токена.")
+    lines += [
+        "",
+        "На этого менеджера бот ставит каждую новую сделку в момент "
+        "создания. Если в amoCRM настроены свои правила распределения, "
+        "они сработают следом и могут его сменить — так и задумано.",
+        "",
+        "Правил «от такого агентства — такому менеджеру» в боте нет: "
+        "это настраивается в самой amoCRM.",
+    ]
+    if users is not None and not users:
+        lines += ["", "❗️ amoCRM не вернула ни одного сотрудника."]
+    elif users and len(users) > RESP_LIMIT:
+        lines += ["", f"Показаны первые {RESP_LIMIT} сотрудников из "
+                      f"{len(users)}."]
+    return "\n".join(lines)
+
+
+def _responsible_kb(users: list[dict]) -> InlineKeyboardMarkup:
+    current = db.responsible_user_id()
+    rows = []
+    for u in users[:RESP_LIMIT]:
+        chosen = u["id"] == current
+        rows.append([InlineKeyboardButton(
+            text=f"{'👤' if chosen else '⬜️'} {u['name']}",
+            callback_data=f"rsp:{u['id']}",
+        )])
+    rows.append([InlineKeyboardButton(
+        text=f"{'⬜️' if current else '✅'} Не задан (как сейчас)",
+        callback_data=f"rsp:{RESP_NOBODY}",
+    )])
+    return mn.back_kb(rows)
+
+
+@dp.callback_query(F.data.startswith("rsp:"))
+async def cb_responsible(c: CallbackQuery) -> None:
+    """
+    Выбор ответственного. Раздел операторский: ответственные и воронки —
+    не тот слой, который показывают владельцу.
+    """
+    if not c.from_user or not is_operator(c.from_user.id):
+        await c.answer("Недоступно", show_alert=True)
+        return
+
+    user_id = int(c.data.split(":")[1])
+    if user_id == RESP_NOBODY:
+        db.set_responsible_user(None, None)
+        users: list[dict] = []
+        try:
+            users = await amo.users()
+        except Exception:  # noqa: BLE001
+            log.exception("список сотрудников amoCRM")
+        await _show_responsible(c, users)
+        await c.answer("Ответственного не ставим")
+        return
+
+    # Имя спрашиваем у amoCRM, а не берём с кнопки: за время, пока раздел
+    # открыт, человека могли переименовать или отключить.
+    users = await amo.users()
+    name = next((u["name"] for u in users if u["id"] == user_id), None)
+    if name is None:
+        await c.answer("Такого сотрудника в amoCRM больше нет",
+                       show_alert=True)
+        await _show_responsible(c, users)
+        return
+
+    db.set_responsible_user(user_id, name)
+    await _show_responsible(c, users)
+    await c.answer(f"Новые фиксации — на {name}")
+
+
+async def _show_responsible(c: CallbackQuery, users: list[dict]) -> None:
+    try:
+        await c.message.edit_text(_responsible_text(users),
+                                  reply_markup=_responsible_kb(users))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @dp.callback_query.middleware()
 async def answer_even_on_failure(handler, event, data):
     """
@@ -904,6 +1010,11 @@ async def _create_in_amo(payload: dict, p: phones.Phone,
         contact_id=contact_id, company_id=company_id,
         pipeline_id=pipeline_id, status_id=status_id,
         tags=["telegram-фиксация"], agent_contact_id=agent_contact_id,
+        # Не выбран — None, и запрос уходит ровно такой же, как раньше.
+        # Дальше правила amoCRM могут переназначить ответственного по
+        # своим настройкам: это не конфликт, бот лишь ставит вменяемого
+        # хозяина в момент создания.
+        responsible_user_id=db.responsible_user_id(),
     )
     await amo.add_note(
         "leads", lead_id,
@@ -2154,6 +2265,15 @@ async def cb_menu(c: CallbackQuery) -> None:
                        mn.tech_menu())
             return
         await show(_pipelines_text(), _pipelines_kb())
+
+    elif section == "resp" and role == mn.OPERATOR:
+        try:
+            users = await amo.users()
+        except Exception as e:  # noqa: BLE001
+            await show("Не смог получить сотрудников amoCRM: "
+                       f"{texts.esc(str(e))[:200]}", mn.tech_menu())
+            return
+        await show(_responsible_text(users), _responsible_kb(users))
 
     elif section == "sync" and role == mn.OPERATOR:
         await show("Синхронизирую amoCRM, это займёт пару минут…")

@@ -402,11 +402,20 @@ LABELS = {"retail": "🏢 розничная", "agency": "🤝 агентска�
           "ignore": "🚫 не учитывать", "unset": "⬜️ не размечена"}
 
 
+#: Отметка «сюда кладём» — в какую агентскую воронку идут новые фиксации.
+TARGET_MARK = "📥"
+TARGET_LABEL = "сюда кладём"
+
+
 def _pipelines_text() -> str:
     rows = db.list_pipelines()
+    target = db.target_pipeline_id()
     lines = ["<b>Разметка воронок amoCRM</b>", ""]
     for r in rows:
-        lines.append(f"{LABELS[r['kind']]} — {texts.esc(r['name'])}")
+        line = f"{LABELS[r['kind']]} — {texts.esc(r['name'])}"
+        if r["pipeline_id"] == target and r["kind"] == "agency":
+            line += f"  {TARGET_MARK} {TARGET_LABEL}"
+        lines.append(line)
     lines += [
         "",
         "<b>Розничная</b> — клиенты отдела продаж. Совпадение с такой "
@@ -415,18 +424,35 @@ def _pipelines_text() -> str:
         "только предупреждает.",
         "",
         "Нажмите на воронку, чтобы поменять её тип.",
+        f"{TARGET_MARK} рядом с агентской — «{TARGET_LABEL}»: именно в неё "
+        "бот создаёт новые фиксации. Отметка одна; остальные агентские "
+        "воронки остаются агентскими и по-прежнему учитываются при поиске "
+        "совпадений.",
     ]
+    if not target:
+        lines.append("Пока не отмечено ничего — фиксации идут в первую "
+                     "агентскую воронку по порядку.")
     return "\n".join(lines)
 
 
 def _pipelines_kb() -> InlineKeyboardMarkup:
     buttons = []
+    target = db.target_pipeline_id()
     for r in db.list_pipelines():
         mark = {"retail": "🏢", "agency": "🤝", "ignore": "🚫", "unset": "⬜️"}[r["kind"]]
-        buttons.append([InlineKeyboardButton(
+        row = [InlineKeyboardButton(
             text=f"{mark} {r['name']}",
             callback_data=f"pl:{r['pipeline_id']}",
-        )])
+        )]
+        # Кнопка выбора — только у агентских: отметить розничную не должно
+        # быть возможно даже случайно, иначе фиксации уедут в отдел продаж.
+        if r["kind"] == "agency":
+            chosen = r["pipeline_id"] == target
+            row.append(InlineKeyboardButton(
+                text=f"{TARGET_MARK} {TARGET_LABEL}" if chosen else "⬜️",
+                callback_data=f"plt:{r['pipeline_id']}",
+            ))
+        buttons.append(row)
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -464,6 +490,31 @@ async def cb_pipeline(c: CallbackQuery) -> None:
     except Exception:  # noqa: BLE001
         pass
     await c.answer(f"Теперь: {LABELS[cycle[current]]}")
+
+
+@dp.callback_query(F.data.startswith("plt:"))
+async def cb_pipeline_target(c: CallbackQuery) -> None:
+    """
+    «Сюда кладём»: выбор агентской воронки для новых фиксаций.
+
+    Меняется только место создания сделок. Разметку kind не трогаем —
+    совпадения ищутся по всем агентским воронкам, и снятие kind у
+    неотмеченных превратило бы чужие агентские фиксации в невидимые.
+    """
+    if not c.from_user or not is_operator(c.from_user.id):
+        await c.answer("Недоступно", show_alert=True)
+        return
+    pid = int(c.data.split(":")[1])
+    if db.pipeline_kinds().get(pid) != "agency":
+        await c.answer("Отметить можно только агентскую воронку",
+                       show_alert=True)
+        return
+    db.set_target_pipeline(pid)
+    try:
+        await c.message.edit_text(_pipelines_text(), reply_markup=_pipelines_kb())
+    except Exception:  # noqa: BLE001
+        pass
+    await c.answer(f"Новые фиксации — {TARGET_MARK} сюда")
 
 
 @dp.message(Command("sync"))

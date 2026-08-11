@@ -51,6 +51,9 @@ CREATE TABLE IF NOT EXISTS pipelines (
     pipeline_id INTEGER NOT NULL,
     name        TEXT,
     kind        TEXT NOT NULL DEFAULT 'unset',   -- retail | agency | ignore | unset
+    -- «сюда кладём»: в какую из агентских воронок падают новые фиксации.
+    -- Отметка ровно одна и на разметку kind не влияет никак.
+    is_target   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (account_id, pipeline_id)
 );
 
@@ -297,6 +300,13 @@ MIGRATIONS = {
     "statuses": [
         ("type", "INTEGER"),
     ],
+    "pipelines": [
+        # «Сюда кладём»: агентских воронок у застройщика бывает несколько,
+        # и раньше бот молча брал первую по номеру. Отметка выбирает нужную.
+        # Разметку kind она не заменяет и не отменяет: поиск совпадений
+        # по-прежнему идёт по всем агентским воронкам.
+        ("is_target", "INTEGER"),
+    ],
     "fixations": [
         # Последний известный этап сделки — по нему ловим изменения.
         ("last_status_id", "INTEGER"),
@@ -476,6 +486,37 @@ class Db:
         )
         self.conn.commit()
 
+    def set_target_pipeline(self, pipeline_id: int) -> None:
+        """
+        Отметить воронку как «сюда кладём». Отметка ровно одна: прежняя
+        снимается тем же нажатием, иначе выбор превратился бы в лотерею
+        по номеру воронки.
+
+        Разметку kind не трогаем совсем. Отметить и «сделать агентской» —
+        разные вещи: совпадения ищутся по всем агентским воронкам, и если
+        снять kind с неотмеченных, чужие фиксации в них перестанут
+        считаться агентскими, а вердикты начнут врать.
+        """
+        self.conn.execute(
+            "UPDATE pipelines SET is_target=0 WHERE account_id=?",
+            (self.account_id,),
+        )
+        self.conn.execute(
+            "UPDATE pipelines SET is_target=1"
+            " WHERE account_id=? AND pipeline_id=?",
+            (self.account_id, pipeline_id),
+        )
+        self.conn.commit()
+
+    def target_pipeline_id(self) -> int | None:
+        """Что отмечено сейчас — как есть, без оглядки на kind."""
+        row = self.conn.execute(
+            "SELECT pipeline_id FROM pipelines"
+            " WHERE account_id=? AND COALESCE(is_target, 0) = 1 LIMIT 1",
+            (self.account_id,),
+        ).fetchone()
+        return row["pipeline_id"] if row else None
+
     def agency_pipeline(self) -> sqlite3.Row | None:
         """
         Воронка, куда бот кладёт свои фиксации.
@@ -483,10 +524,15 @@ class Db:
         Берётся из разметки, а не из настроек: иначе агентские сделки
         попадут в розничную воронку и бот начнёт блокировать собственные
         же фиксации как «клиентов отдела продаж».
+
+        Отмеченная оператором идёт первой. Отметки нет — прежнее правило,
+        первая агентская по номеру. Отметка на неагентской воронке молча
+        не действует: `kind='agency'` в условии остаётся последней защитой
+        от того, чтобы фиксации уехали в розницу.
         """
         return self.conn.execute(
             "SELECT * FROM pipelines WHERE account_id=? AND kind='agency'"
-            " ORDER BY pipeline_id LIMIT 1",
+            " ORDER BY COALESCE(is_target, 0) DESC, pipeline_id LIMIT 1",
             (self.account_id,),
         ).fetchone()
 

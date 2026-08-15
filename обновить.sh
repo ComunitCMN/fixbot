@@ -81,19 +81,93 @@ dead_units() {
     return 0
 }
 
-crash_in_logs() {
-    # Свежие падения — их пишет сам Python при старте. Служба с
-    # Restart=always при этом выглядит живой: падает и поднимается
-    # по кругу, а systemctl показывает «active».
-    for f in /opt/fixbot/app/bot.log /opt/fixbot/clients/*/bot.log; do
-        [ -f "$f" ] || continue
-        if tail -40 "$f" | grep -qE "Traceback|NameError|ImportError|SyntaxError"; then
-            echo "$f"
-            return 0
-        fi
+# <<< проверка логов
+#
+# Свежие падения пишет сам Python при старте. Служба с Restart=always
+# при этом выглядит живой: падает и поднимается по кругу, а systemctl
+# показывает «active». Поэтому лог смотреть надо — но правильно.
+#
+# Раньше здесь было `tail -40 | grep Traceback`, и 15.08.2026 это
+# отменило исправную выкатку: в хвосте лога лежал след с прошлого
+# запуска. Две ошибки сразу:
+#
+#   * времени проверка не знала — старая беда отменяла любую будущую
+#     выкатку, а у редко пишущего клиента она живёт в хвосте неделями;
+#   * «упал» и «поймал» не различались. `bot.py` намеренно ловит сбой
+#     первой синхронизации и пишет его через `log.exception` — слово
+#     `Traceback` в логе появляется по замыслу, бот при этом работает.
+#
+# Теперь читаем только то, что дописалось после перезапуска, и считаем
+# падением лишь то, за чем не последовал успешный запуск.
+
+LOGS_ROOT=${FIXBOT_LOGS_ROOT:-/opt/fixbot}
+
+#: Строка, которую aiogram пишет, когда бот действительно поднялся.
+ALIVE_MARK="Run polling"
+BAD_MARKS="Traceback|NameError|ImportError|SyntaxError"
+
+# Снимок длин логов держим в файле, а не в ассоциативном массиве:
+# `declare -A` — это bash 4, а на маке владельца bash 3.2, и там такой
+# массив молча превращается в обычный. Файл понимают обе версии.
+LOG_SIZES=""
+
+log_files() {
+    local f
+    for f in "$LOGS_ROOT"/app/bot.log "$LOGS_ROOT"/clients/*/bot.log; do
+        [ -f "$f" ] && echo "$f"
     done
+    return 0
+}
+
+#: Строк в файле. `tr` убирает отступ, которым wc сопровождает число на маке.
+count_lines() {
+    wc -l < "$1" | tr -d ' '
+}
+
+snapshot_logs() {
+    LOG_SIZES=$(mktemp "${TMPDIR:-/tmp}/fixbot-logs.XXXXXX")
+    local f
+    while read -r f; do
+        printf '%s\t%s\n' "$(count_lines "$f")" "$f" >> "$LOG_SIZES"
+    done < <(log_files)
+}
+
+#: Сколько строк было в этом логе до перезапуска. Путь сверяем целиком —
+#: в нём бывают пробелы.
+lines_before() {
+    [ -n "$LOG_SIZES" ] && [ -f "$LOG_SIZES" ] || { echo 0; return 0; }
+    awk -F '\t' -v p="$1" '$2 == p { n = $1 } END { print n + 0 }' "$LOG_SIZES"
+}
+
+crash_in_logs() {
+    local f now from fresh last_bad last_ok
+    while read -r f; do
+        now=$(count_lines "$f")
+        from=$(lines_before "$f")
+        # Лог могли обрезать или заменить при ротации — тогда он весь новый.
+        [ "$now" -lt "$from" ] && from=0
+
+        fresh=$(tail -n "+$((from + 1))" "$f")
+        [ -n "$fresh" ] || continue
+
+        last_bad=$(printf '%s\n' "$fresh" | grep -nE "$BAD_MARKS" \
+                   | tail -1 | cut -d: -f1)
+        [ -n "$last_bad" ] || continue
+
+        # Пойманная ошибка — не падение: за ней идёт успешный запуск.
+        # У настоящего падения трассировка последняя, запуска за ней нет.
+        last_ok=$(printf '%s\n' "$fresh" | grep -n "$ALIVE_MARK" \
+                  | tail -1 | cut -d: -f1)
+        if [ -n "$last_ok" ] && [ "$last_ok" -gt "$last_bad" ]; then
+            continue
+        fi
+
+        echo "$f"
+        return 0
+    done < <(log_files)
     return 1
 }
+# >>> проверка логов
 
 WAS=$(as_owner git rev-parse HEAD)
 WAS_TEXT=$(as_owner git log -1 --format='%s')
@@ -156,6 +230,9 @@ tail -1 /tmp/fixbot-deploy.txt
 
 # --- 4. перезапуск ----------------------------------------------------
 echo "Перезапускаю ботов…"
+# Запоминаем длину логов до перезапуска: смотреть будем только то,
+# что дописалось после него.
+snapshot_logs
 restart_all
 sleep 20
 

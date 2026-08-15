@@ -49,6 +49,34 @@ def test_script_is_executable(script):
 
 
 @pytest.mark.parametrize("script", СКРИПТЫ, ids=lambda p: p.name)
+def test_no_bash4_only_features(script):
+    """
+    На сервере bash 5, а на маке владельца — 3.2: Apple не обновляет его
+    с 2007 года из-за лицензии. Ассоциативный массив (`declare -A`) там
+    не работает вовсе, и скрипт молча начинает считать не то.
+
+    Так и вышло 15.08.2026: проверка логов прошла у меня и на сервере,
+    а на маке легла. Пишем на том bash, который есть у обоих.
+    """
+    плохие = []
+    for n, s in enumerate(текст(script.name).splitlines(), 1):
+        if s.lstrip().startswith("#"):
+            continue
+        тело = s.split("#", 1)[0]
+        for приём, чем in (
+            (r"declare\s+-A", "ассоциативный массив"),
+            (r"\blocal\s+-A", "ассоциативный массив"),
+            (r"\$\{[A-Za-z_][A-Za-z_0-9]*\^\^", "${имя^^} — верхний регистр"),
+            (r"\$\{[A-Za-z_][A-Za-z_0-9]*,,", "${имя,,} — нижний регистр"),
+            (r"\breadarray\b|\bmapfile\b", "mapfile/readarray"),
+        ):
+            if re.search(приём, тело):
+                плохие.append(f"{n}: {чем} — {s.strip()}")
+    assert плохие == [], (f"{script.name}: bash 3.2 на маке этого не умеет\n"
+                          + "\n".join(плохие))
+
+
+@pytest.mark.parametrize("script", СКРИПТЫ, ids=lambda p: p.name)
 def test_no_cyrillic_identifiers(script):
     """
     Соблазн назвать переменную по-русски велик — документация проекта
@@ -101,6 +129,110 @@ def test_update_notices_a_traceback_in_the_log():
     """Служба с Restart=always выглядит живой, даже падая по кругу."""
     src = текст("обновить.sh")
     assert "Traceback" in src and "NameError" in src
+
+
+# ---------- проверка логов после перезапуска ----------
+#
+# 15.08.2026 выкатка откатилась впустую: в хвосте лога breig лежала
+# трассировка с прошлого запуска — пойманный `httpx.ReadError` из первой
+# синхронизации, который `bot.py` намеренно ловит и пишет через
+# `log.exception`. Бот при этом поднялся и работал. Проверка смотрела
+# последние 40 строк без учёта времени и не различала «упал» и «поймал».
+#
+# Поэтому ниже она проверяется не чтением текста, а прогоном: блок
+# из `обновить.sh` запускается на выдуманных логах.
+
+МАРКЕР_НАЧАЛО = "# <<< проверка логов"
+МАРКЕР_КОНЕЦ = "# >>> проверка логов"
+
+СТАРТ = ("2026-08-15 10:54:02,679 INFO fixbot: Вебхук снят\n"
+         "2026-08-15 10:54:02,679 INFO aiogram.dispatcher: Start polling\n"
+         "2026-08-15 10:54:02,685 INFO aiogram.dispatcher: Run polling "
+         "for bot @test id=1 - 'test'\n")
+
+ТРАССИРОВКА = ("Traceback (most recent call last):\n"
+               '  File "/opt/fixbot/app/amo.py", line 156, in dump_leads\n'
+               "httpx.ReadError\n")
+
+
+def _блок_проверки_логов() -> str:
+    src = текст("обновить.sh")
+    assert МАРКЕР_НАЧАЛО in src and МАРКЕР_КОНЕЦ in src, (
+        "в обновить.sh нет размеченного блока проверки логов — "
+        "его нельзя прогнать, можно только прочитать глазами")
+    return src.split(МАРКЕР_НАЧАЛО, 1)[1].split(МАРКЕР_КОНЕЦ, 1)[0]
+
+
+def _откат_бы_случился(tmp_path, было: str, стало: str) -> bool:
+    """
+    Гоняет настоящий блок из `обновить.sh` на выдуманном логе.
+
+    `было` — что лежало в логе до перезапуска, `стало` — что дописалось
+    после. Возвращает True, если скрипт счёл это падением и откатился бы.
+    """
+    root = tmp_path / "fixbot"
+    (root / "app").mkdir(parents=True)
+    (root / "clients" / "breig").mkdir(parents=True)
+    лог = root / "clients" / "breig" / "bot.log"
+    лог.write_text(было, encoding="utf-8")
+    (root / "app" / "bot.log").write_text(СТАРТ, encoding="utf-8")
+
+    дописать = tmp_path / "after.txt"
+    дописать.write_text(стало, encoding="utf-8")
+
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        "set -u\n"
+        f'export FIXBOT_LOGS_ROOT="{root}"\n'
+        + _блок_проверки_логов()
+        + "\nsnapshot_logs\n"
+        f'cat "{дописать}" >> "{лог}"\n'
+        "if crash_in_logs > /dev/null; then echo ОТКАТ; else echo ЖИВОЙ; fi\n",
+        encoding="utf-8")
+
+    r = subprocess.run(["bash", str(harness)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return "ОТКАТ" in r.stdout
+
+
+def test_old_traceback_does_not_cancel_the_update(tmp_path):
+    """
+    Ровно случай 15.08.2026. Трассировка осталась с прошлого запуска,
+    после перезапуска бот поднялся — откатывать нечего. Лог у клиента
+    редкий, поэтому старый след живёт в хвосте неделями.
+    """
+    было = ТРАССИРОВКА + СТАРТ
+    assert not _откат_бы_случился(tmp_path, было, стало=СТАРТ)
+
+
+def test_caught_error_at_startup_does_not_cancel_the_update(tmp_path):
+    """
+    Ошибку связи с amoCRM при первой синхронизации `bot.py` ловит
+    намеренно и пишет через `log.exception` — слово `Traceback`
+    в логе появляется по замыслу. Бот после неё стартует, и это видно:
+    строка про запуск идёт следом.
+    """
+    assert not _откат_бы_случился(tmp_path, было=СТАРТ,
+                                  стало=ТРАССИРОВКА + СТАРТ)
+
+
+def test_real_crash_still_cancels_the_update(tmp_path):
+    """
+    Обратная сторона: настоящее падение обязано откатывать. У него
+    трассировка последняя — запуска за ней нет, потому что его не было.
+    """
+    падение = ("Traceback (most recent call last):\n"
+               '  File "/opt/fixbot/app/bot.py", line 1, in <module>\n'
+               "ImportError: cannot import name 'exp'\n")
+    assert _откат_бы_случился(tmp_path, было=СТАРТ, стало=падение * 3)
+
+
+def test_untouched_log_is_not_read_at_all(tmp_path):
+    """
+    Смотреть надо только то, что дописалось после перезапуска. Иначе
+    любая старая беда в файле отменяет любую будущую выкатку.
+    """
+    assert not _откат_бы_случился(tmp_path, было=ТРАССИРОВКА, стало="")
 
 
 @pytest.mark.parametrize("script", ["обновить.sh", "откатить.sh"])

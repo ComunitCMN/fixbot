@@ -81,6 +81,11 @@ def tech_menu() -> InlineKeyboardMarkup:
                               callback_data="m:resp")],
         [InlineKeyboardButton(text="🔄 Синхронизировать amoCRM",
                               callback_data="m:sync")],
+        # Файл с полной базой застройщика — самый ценный артефакт во всей
+        # системе, поэтому кнопка живёт здесь: раздел видит только
+        # оператор. Владельцу её не показываем, как и воронки.
+        [InlineKeyboardButton(text="📗 Выгрузка базы в Excel",
+                              callback_data="m:export")],
         [InlineKeyboardButton(text="🩺 Состояние", callback_data="m:health")],
     ])
 

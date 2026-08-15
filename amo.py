@@ -170,6 +170,64 @@ class AmoClient:
             })
         return out
 
+    async def dump_leads_full(self) -> list[dict]:
+        """
+        Сделки для выгрузки базы: этап, контакты и причина отказа.
+
+        Отдельно от `dump_leads`: тот кормит зеркало и намеренно берёт
+        минимум — зеркалу нужно только происхождение контакта. Причины
+        отказа в зеркале нет и не предполагается, поэтому здесь она
+        запрашивается прямо у amoCRM параметром `with`.
+
+        Только чтение.
+        """
+        out = []
+        async for l in self._paginate(  # noqa: E741
+            "/api/v4/leads", "leads",
+            params={"with": "contacts,loss_reason"},
+        ):
+            emb = l.get("_embedded") or {}
+            raw = emb.get("loss_reason")
+            if isinstance(raw, dict):
+                raw = [raw]
+            reason = next((r.get("name") for r in (raw or [])
+                           if isinstance(r, dict) and r.get("name")), None)
+            out.append({
+                "id": l["id"],
+                "pipeline_id": l.get("pipeline_id"),
+                "status_id": l.get("status_id"),
+                "name": l.get("name"),
+                "created_at": l.get("created_at"),
+                "updated_at": l.get("updated_at") or l.get("created_at"),
+                "contact_ids": [c["id"] for c in (emb.get("contacts") or [])],
+                "loss_reason": reason,
+            })
+        return out
+
+    async def dump_contacts_full(self) -> list[dict]:
+        """
+        Контакты для выгрузки: имя и телефоны, включая тех, у кого
+        телефона нет вовсе.
+
+        `dump_contacts` таких пропускает — зеркалу они не нужны, оно
+        ищет по номеру. В файле сделка без номера всё равно нужна: иначе
+        строка исчезнет молча.
+
+        Только чтение.
+        """
+        out = []
+        async for c in self._paginate("/api/v4/contacts", "contacts"):
+            phones = [
+                v.get("value")
+                for f in (c.get("custom_fields_values") or [])
+                if f.get("field_code") == "PHONE"
+                for v in (f.get("values") or [])
+                if v.get("value")
+            ]
+            out.append({"id": c["id"], "name": c.get("name"),
+                        "phones": phones})
+        return out
+
     async def search_contacts(self, query: str, with_leads: bool = False) -> list[dict]:
         params: dict = {"query": query, "limit": 50}
         if with_leads:

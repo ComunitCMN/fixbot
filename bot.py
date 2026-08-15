@@ -29,10 +29,10 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import (CallbackQuery, ChatMemberUpdated, ForceReply,
-                           InlineKeyboardButton, InlineKeyboardMarkup,
-                           KeyboardButton, Message, ReplyKeyboardMarkup,
-                           ReplyKeyboardRemove)
+from aiogram.types import (BufferedInputFile, CallbackQuery,
+                           ChatMemberUpdated, ForceReply, InlineKeyboardButton,
+                           InlineKeyboardMarkup, KeyboardButton, Message,
+                           ReplyKeyboardMarkup, ReplyKeyboardRemove)
 
 import httpx
 import phonenumbers as pn
@@ -44,6 +44,7 @@ import billing_run as blrun
 import billing_ui as blui
 import broadcast as bc
 import clients as cl
+import export_base as exp
 import menu as mn
 import onboarding as onb
 import provision as pv
@@ -2285,6 +2286,16 @@ async def cb_menu(c: CallbackQuery) -> None:
         except Exception as e:  # noqa: BLE001
             await show(f"Ошибка: {texts.esc(str(e))[:300]}", mn.tech_menu())
 
+    elif section == "export" and role == mn.OPERATOR:
+        # Полный обход amoCRM — минуты. Отвечаем сразу: иначе Telegram
+        # оборвёт кнопку по таймауту, и это прочтётся как поломка.
+        await show("📗 <b>Выгрузка базы</b>\n\n"
+                   "Начал. Полный обход amoCRM занимает несколько минут — "
+                   "файл придёт сюда же, отдельным сообщением.\n\n"
+                   "<i>Выгрузка только читает: в amoCRM и в базе бота "
+                   "ничего не меняется.</i>", mn.tech_menu())
+        asyncio.create_task(run_export(c.from_user.id))
+
     elif section == "health" and role == mn.OPERATOR:
         await show(_health_text(), mn.tech_menu())
 
@@ -2293,6 +2304,44 @@ async def cb_menu(c: CallbackQuery) -> None:
         return
 
     await c.answer()
+
+
+async def run_export(user_id: int) -> None:
+    """
+    Выгрузка базы застройщика в Excel — фоном, по нажатию оператора.
+
+    Только чтение: ни в amoCRM, ни в базу бота ничего не пишется, схема
+    не меняется. Решение и обоснование — в РЕШЕНИЯ.md, раздел «Выгрузка
+    базы застройщика в Excel».
+
+    Файл уходит в Telegram, а не на Google Drive: канал уже проверен —
+    так же уходят ночные копии. На Drive оператор перекладывает сам.
+    """
+    log.info("Выгрузка базы: начал, попросил %s", user_id)
+    try:
+        data = await exp.collect(amo)
+        blob = exp.build_workbook(**data)
+    except Exception as e:  # noqa: BLE001
+        log.exception("Выгрузка базы не удалась")
+        await _send_dm(user_id, "❌ Выгрузка не удалась: "
+                                f"{texts.esc(str(e))[:300]}\n\n"
+                                "В amoCRM и в базе при этом ничего "
+                                "не изменилось.")
+        return
+
+    leads = len(data["leads"])
+    log.info("Выгрузка базы: готово, %s сделок, %s КБ", leads, len(blob) // 1024)
+    try:
+        await bot.send_document(
+            user_id,
+            BufferedInputFile(blob, filename=exp.file_name(cfg.developer_name)),
+            caption=f"📗 Выгрузка базы: {leads} сделок, "
+                    f"{len(data['pipelines'])} воронок.",
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("Не смог отправить файл выгрузки")
+        await _send_dm(user_id, "Файл собрал, но отправить не смог: "
+                                f"{texts.esc(str(e))[:200]}")
 
 
 def _health_text() -> str:

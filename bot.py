@@ -2154,6 +2154,7 @@ async def cb_menu(c: CallbackQuery) -> None:
         await show(mn.HELP_TEXT)
 
     elif section == "chats":
+        await _list_bound_chats()
         rows = _chat_rows()
         await show(mn.chats_overview(rows), mn.back_kb(mn.chats_kb(rows)))
 
@@ -2659,6 +2660,10 @@ async def on_added_to_chat(update: ChatMemberUpdated) -> None:
         return
     if new.status not in ("member", "administrator"):
         return
+    # Сразу в список групп: иначе группа, где ещё не писали, не видна
+    # в меню, и закрепление из приветствия не поправить.
+    db.register_chat(update.chat.id, update.chat.title,
+                     is_admin=new.status == "administrator")
     if db.get_meta(f"chat_agency:{update.chat.id}"):
         return          # уже настроен
 
@@ -3057,6 +3062,24 @@ async def try_billing_start_reply(m: Message) -> bool:
             InlineKeyboardButton(text="💳 Задать реквизиты",
                                  callback_data=f"bl:wallet:{slug}")]]))
     return True
+
+
+async def _list_bound_chats() -> None:
+    """
+    Дописать в список групп закреплённые, о которых список не знает.
+
+    Так было у групп, настроенных до 06.10.2026: закрепление при
+    добавлении бота в список их не заносило, а сообщений там ещё не было.
+    Спрашиваем у Telegram только про недостающие и только название;
+    не ответил — пишем без названия, группа всё равно должна быть видна.
+    """
+    for chat_id in db.bound_chats_not_listed():
+        title = None
+        try:
+            title = (await bot.get_chat(chat_id)).title
+        except Exception as e:  # noqa: BLE001
+            log.info("Не узнал название группы %s: %s", chat_id, e)
+        db.register_chat(chat_id, title)
 
 
 def _chat_rows() -> list[dict]:

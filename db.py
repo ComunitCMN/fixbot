@@ -1528,7 +1528,12 @@ class Db:
         случайно задетых. Признак «впервые» — чтобы сказать владельцу
         про новую группу ровно один раз, а не при каждом сообщении.
         """
-        first = self.get_chat(chat_id) is None
+        # Группа могла быть записана заранее, при добавлении бота, — тогда
+        # строка есть, а сообщений ещё не было. «Впервые» — это первое
+        # сообщение, а не первая строка: иначе владелец не узнал бы
+        # о незакреплённой группе вовсе.
+        seen = self.get_chat(chat_id)
+        first = seen is None or seen["messages"] == 0
         now = int(time.time())
         flag = None if is_admin is None else int(is_admin)
         self.conn.execute(
@@ -1543,6 +1548,42 @@ class Db:
         )
         self.conn.commit()
         return first
+
+    def register_chat(self, chat_id: int, title: str | None = None,
+                      is_admin: bool | None = None) -> None:
+        """
+        Записать группу в список, не засчитывая сообщения.
+
+        Для групп, о которых бот узнал не из переписки: его добавили
+        или за группой закрепили агентство. Без этого закреплённая, но
+        молчащая группа не видна в «Группах» и её нельзя перезакрепить.
+        """
+        now = int(time.time())
+        flag = None if is_admin is None else int(is_admin)
+        self.conn.execute(
+            "INSERT INTO chats (account_id, chat_id, title, is_admin,"
+            " messages, first_seen, last_seen) VALUES (?,?,?,?,0,?,?)"
+            " ON CONFLICT(account_id, chat_id) DO UPDATE SET"
+            "  title=COALESCE(excluded.title, chats.title),"
+            "  is_admin=COALESCE(excluded.is_admin, chats.is_admin)",
+            (self.account_id, chat_id, title, flag, now, now),
+        )
+        self.conn.commit()
+
+    def bound_chats_not_listed(self) -> list[int]:
+        """Группы с закреплённым агентством, которых нет в списке групп."""
+        listed = {r["chat_id"] for r in self.conn.execute(
+            "SELECT chat_id FROM chats WHERE account_id=?",
+            (self.account_id,))}
+        out = []
+        for r in self.conn.execute(
+                "SELECT key FROM meta WHERE account_id=?"
+                " AND key LIKE 'chat_agency:%' AND COALESCE(value,'')!=''",
+                (self.account_id,)):
+            raw = r["key"].split(":", 1)[1]
+            if raw.lstrip("-").isdigit() and int(raw) not in listed:
+                out.append(int(raw))
+        return out
 
     def get_chat(self, chat_id: int):
         return self.conn.execute(

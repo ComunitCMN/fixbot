@@ -498,3 +498,149 @@ async def test_guard_does_not_swallow_normal_results():
         return "готово"
 
     assert await b.answer_even_on_failure(fine, object(), {}) == "готово"
+
+
+# ===================== закреплённые группы в списке =====================
+#
+# 06.10.2026, Eco Invest: за агентствами закреплено 14 групп, а в разделе
+# «Группы» видно 3. Группа попадала в список только с первым текстовым
+# сообщением, а закрепление при добавлении бота её туда не записывало.
+# Перезакрепить такую группу из меню было нельзя — её там просто нет.
+
+def _owner_opens_groups(b, monkeypatch, db, get_chat):
+    """Владелец жмёт «💬 Группы». Возвращает текст и кнопки ответа."""
+    monkeypatch.setattr(b, "db", db)
+    monkeypatch.setattr(b.cfg, "owner_ids", {2})
+    monkeypatch.setattr(b.bot, "get_chat", get_chat)
+
+    shown: dict = {}
+
+    async def edit_text(text, reply_markup=None, **kw):
+        shown["text"] = text
+        shown["kb"] = [x.callback_data for row in reply_markup.inline_keyboard
+                       for x in row]
+
+    async def answer(*a, **kw):
+        pass
+
+    c = SimpleNamespace(from_user=SimpleNamespace(id=2), data="m:chats",
+                        message=SimpleNamespace(edit_text=edit_text),
+                        answer=answer)
+    return c, shown
+
+
+async def test_bound_group_is_listed_before_anyone_writes(tmp_path,
+                                                          monkeypatch):
+    """Закрепили агентство, в чате тишина — группа всё равно в списке."""
+    import bot as b
+
+    db = Db(tmp_path / "bound.db")
+    aid = db.create_agency("Tatyana", "tatyana")
+    db.set_meta("chat_agency:-5536156685", str(aid))
+
+    async def get_chat(chat_id):
+        assert chat_id == -5536156685
+        return SimpleNamespace(title="Tatyana & Eco Invest")
+
+    c, shown = _owner_opens_groups(b, monkeypatch, db, get_chat)
+    await b.cb_menu(c)
+
+    assert "Tatyana &amp; Eco Invest" in shown["text"]   # HTML-разметка
+    assert "ch:open:-5536156685" in shown["kb"]     # и её можно открыть
+
+
+async def test_bound_group_is_listed_even_if_telegram_is_silent(
+        tmp_path, monkeypatch):
+    """
+    Бота могли выгнать, группу — превратить в супергруппу с новым номером.
+    Telegram тогда названия не скажет, но закреплённая группа не должна
+    исчезать из списка: иначе привязку не увидеть и не поправить.
+    """
+    import bot as b
+
+    db = Db(tmp_path / "silent.db")
+    aid = db.create_agency("Avega Estate", "avega estate")
+    db.set_meta("chat_agency:-5584519464", str(aid))
+
+    async def get_chat(chat_id):
+        raise RuntimeError("chat not found")
+
+    c, shown = _owner_opens_groups(b, monkeypatch, db, get_chat)
+    await b.cb_menu(c)
+
+    assert "Avega Estate" in shown["text"]
+    assert "ch:open:-5584519464" in shown["kb"]
+
+
+async def test_telegram_is_asked_only_about_missing_groups(tmp_path,
+                                                           monkeypatch):
+    """Уже известные группы не дёргаем запросами на каждом открытии."""
+    import bot as b
+
+    db = Db(tmp_path / "once.db")
+    aid = db.create_agency("Sergey", "sergey")
+    db.set_meta("chat_agency:-5153792644", str(aid))
+    db.see_chat(-5153792644, "Eco Invest Group & Sergey")
+
+    async def get_chat(chat_id):
+        raise AssertionError("спросили про группу, которая уже в списке")
+
+    c, shown = _owner_opens_groups(b, monkeypatch, db, get_chat)
+    await b.cb_menu(c)
+    assert "Eco Invest Group &amp; Sergey" in shown["text"]
+
+
+def _added(chat_id, title, status="administrator"):
+    return SimpleNamespace(
+        chat=SimpleNamespace(id=chat_id, type="group", title=title),
+        new_chat_member=SimpleNamespace(status=status))
+
+
+async def test_group_is_listed_as_soon_as_the_bot_is_added(tmp_path,
+                                                           monkeypatch):
+    import bot as b
+
+    db = Db(tmp_path / "added.db")
+    monkeypatch.setattr(b, "db", db)
+
+    async def send_message(*a, **kw):
+        pass
+
+    monkeypatch.setattr(b.bot, "send_message", send_message)
+
+    await b.on_added_to_chat(_added(-777, "Nikita × Eco Invest"))
+
+    row = db.get_chat(-777)
+    assert row is not None
+    assert row["title"] == "Nikita × Eco Invest"
+    assert row["is_admin"] == 1
+    assert row["messages"] == 0          # сообщений ещё не было
+
+
+async def test_adding_a_bound_group_again_still_lists_it(tmp_path,
+                                                         monkeypatch):
+    """Повторное добавление уже настроенной группы — тоже повод её записать."""
+    import bot as b
+
+    db = Db(tmp_path / "again.db")
+    aid = db.create_agency("Ivan", "ivan")
+    db.set_meta("chat_agency:-888", str(aid))
+    monkeypatch.setattr(b, "db", db)
+
+    await b.on_added_to_chat(_added(-888, "Ivan & Eco", status="member"))
+
+    row = db.get_chat(-888)
+    assert row is not None and row["is_admin"] == 0
+
+
+def test_registering_on_add_keeps_the_first_message_announcement(tmp_path):
+    """
+    Владелец узнаёт о незакреплённой группе с первым сообщением из неё.
+    Запись группы при добавлении бота не должна это съесть.
+    """
+    db = Db(tmp_path / "first.db")
+    db.register_chat(-999, "Новая группа", is_admin=True)
+
+    assert db.see_chat(-999, "Новая группа") is True     # всё ещё «впервые»
+    assert db.see_chat(-999, "Новая группа") is False
+    assert db.get_chat(-999)["messages"] == 2

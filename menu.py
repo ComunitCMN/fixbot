@@ -336,3 +336,92 @@ def new_chat_alert(title: str | None, chat_id: int, guess: str | None) -> str:
     lines.append("Закрепите агентство и язык, чтобы бот отвечал правильно "
                  "и не спрашивал агентство у каждого.")
     return "\n".join(lines)
+
+
+# ===================== списки групп =====================
+#
+# Сохранённые наборы групп для рассылок. Отправка по списку — только
+# кнопкой «🚀 Отправить» в разделе «Рассылка»: ни расписания, ни
+# отложенной отправки здесь нет и быть не должно.
+
+#: Сколько групп поимённо показываем на одном экране. Сообщение Telegram
+#: ограничено 4096 знаками, а название группы бывает длинным.
+LIST_NAMES_SHOWN = 60
+
+
+def chat_lists_text(lists: list) -> str:
+    if not lists:
+        return ("📋 <b>Списки групп</b>\n\n"
+                "Список — это сохранённый набор групп для рассылки: "
+                "например, «Бали» или «крупные агентства». Собираете один "
+                "раз, дальше в рассылке выбираете его одной кнопкой.\n\n"
+                "Пока списков нет.")
+    lines = ["📋 <b>Списки групп</b>", ""]
+    for r in lists:
+        lines.append(f"• {esc(r['name'])} — групп: {r['count']}")
+    lines += ["", "<i>Откройте список, чтобы добавить или убрать группы.</i>"]
+    return "\n".join(lines)
+
+
+def chat_lists_kb(lists: list) -> list:
+    kb = [[InlineKeyboardButton(
+        text=f"📋 {r['name'][:34]} ({r['count']})",
+        callback_data=f"gl:open:{r['id']}")] for r in lists[:40]]
+    kb.append([InlineKeyboardButton(text="➕ Новый список",
+                                    callback_data="gl:new")])
+    kb.append([InlineKeyboardButton(text="← Группы", callback_data="m:chats")])
+    return kb
+
+
+def chat_list_text(name: str, members: int, bound: int, unbound: int) -> str:
+    lines = [f"📋 <b>{esc(name)}</b>", ""]
+    if not bound:
+        lines.append("Закреплённых за агентствами групп пока нет — "
+                     "добавлять в список нечего.")
+    else:
+        lines.append("Нажмите на группу, чтобы добавить её в список "
+                     "или убрать. ✅ — группа в списке.")
+    lines += ["", f"В списке групп: {members}"]
+    if unbound:
+        lines.append(f"Из них откреплены от агентства: {unbound} — "
+                     "рассылку они не получат.")
+    return "\n".join(lines)
+
+
+def chat_list_kb(list_id: int, groups: list[tuple[int, str]],
+                 members: set[int]) -> list:
+    kb = [[InlineKeyboardButton(
+        text=f"{'✅' if chat_id in members else '▫️'} {title[:38]}",
+        callback_data=f"gl:t:{list_id}:{chat_id}")]
+        for chat_id, title in groups[:80]]
+    kb.append([InlineKeyboardButton(text="✏️ Переименовать",
+                                    callback_data=f"gl:ren:{list_id}"),
+               InlineKeyboardButton(text="🗑 Удалить",
+                                    callback_data=f"gl:del:{list_id}")])
+    kb.append([InlineKeyboardButton(text="← Списки", callback_data="gl:home")])
+    return kb
+
+
+def _names(titles: list[str]) -> list[str]:
+    out = [f"• {esc(t)}" for t in titles[:LIST_NAMES_SHOWN]]
+    if len(titles) > LIST_NAMES_SHOWN:
+        out.append(f"…и ещё {len(titles) - LIST_NAMES_SHOWN}")
+    return out
+
+
+def list_broadcast_confirm(name: str, send: list[str],
+                           skipped: list[str]) -> str:
+    """Экран подтверждения рассылки по списку: все группы поимённо."""
+    lines = [f"📋 <b>Рассылка по списку «{esc(name)}»</b>", ""]
+    if send:
+        lines.append(f"Получат — групп: {len(send)}")
+        lines += _names(send)
+    else:
+        lines.append("Отправлять некому: в списке не осталось "
+                     "закреплённых групп.")
+    if skipped:
+        lines += ["", f"Пропущены — откреплены от агентства: {len(skipped)}"]
+        lines += _names(skipped)
+    if send:
+        lines += ["", "Отправляем?"]
+    return "\n".join(lines)

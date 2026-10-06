@@ -1669,6 +1669,8 @@ async def on_private_any(m: Message) -> None:
         return
     if await try_add_staff(m):
         return
+    if await try_chat_list_name_reply(m):
+        return
     if await try_capture_broadcast(m):
         return
     await on_private_text(m)
@@ -2156,7 +2158,10 @@ async def cb_menu(c: CallbackQuery) -> None:
     elif section == "chats":
         await _list_bound_chats()
         rows = _chat_rows()
-        await show(mn.chats_overview(rows), mn.back_kb(mn.chats_kb(rows)))
+        lists_btn = [InlineKeyboardButton(text="📋 Списки групп",
+                                          callback_data="gl:home")]
+        await show(mn.chats_overview(rows),
+                   mn.back_kb([lists_btn] + mn.chats_kb(rows)))
 
     elif section == "agencies":
         await show(mn.agencies_text(db.list_agencies()))
@@ -2191,6 +2196,9 @@ async def cb_menu(c: CallbackQuery) -> None:
 
     elif section == "bcast":
         _awaiting_broadcast[c.from_user.id] = time.time()
+        # Иначе текст рассылки ушёл бы в название списка, если перед
+        # этим нажали «➕ Новый список» и передумали.
+        db.set_meta(f"await_glist:{c.from_user.id}", "")
         await show("📣 <b>Рассылка</b>\n\n"
                    "Пришлите или перешлите сюда сообщение — как оно должно "
                    "выглядеть у агентов. Можно с фото, видео, альбомом и "
@@ -2414,6 +2422,7 @@ async def cmd_broadcast(m: Message) -> None:
     if not m.from_user or not has_menu(m.from_user.id):
         return
     _awaiting_broadcast[m.from_user.id] = time.time()
+    db.set_meta(f"await_glist:{m.from_user.id}", "")
     await m.answer(
         "📣 <b>Рассылка</b>\n\n"
         "Пришлите или перешлите сюда сообщение — как оно должно выглядеть "
@@ -2437,6 +2446,7 @@ async def cmd_cancel_broadcast(m: Message) -> None:
     _awaiting_broadcast.pop(uid, None)
     db.set_meta(f"await_wallet:{uid}", "")
     db.set_meta(f"await_start:{uid}", "")
+    db.set_meta(f"await_glist:{uid}", "")
 
     what = ["Отменено."]
     row = db.active_onboarding(uid)
@@ -2524,10 +2534,13 @@ def _bcast_target_kb(bid: int) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="👥 Всем агентам",
                               callback_data=f"bc:{bid}:all")],
-        [InlineKeyboardButton(text="🔥 Активным за 30 дней",
-                              callback_data=f"bc:{bid}:active")],
+        # «🔥 Активным за 30 дней» убрана. Ветка `active` ниже и
+        # `active_days` в db.py остались: черновики, начатые до правки,
+        # должны отправиться как задумано.
         [InlineKeyboardButton(text="💬 В рабочие чаты",
                               callback_data=f"bc:{bid}:chats")],
+        [InlineKeyboardButton(text="📋 В список групп…",
+                              callback_data=f"bc:{bid}:lists")],
         [InlineKeyboardButton(text="🏢 Отдельному агентству",
                               callback_data=f"bc:{bid}:agency")],
         [InlineKeyboardButton(text="❌ Отмена",
@@ -2563,8 +2576,42 @@ async def cb_broadcast(c: CallbackQuery) -> None:
         await c.answer()
         return
 
+    if action == "back":
+        await c.message.edit_reply_markup(reply_markup=_bcast_target_kb(bid))
+        await c.answer()
+        return
+
+    if action == "lists":
+        lists = db.list_chat_lists()
+        if not lists:
+            await c.answer("Списков пока нет. Соберите первый: "
+                           "«💬 Группы → 📋 Списки групп».", show_alert=True)
+            return
+        rows = [[InlineKeyboardButton(
+            text=f"📋 {r['name'][:34]} ({r['count']})",
+            callback_data=f"bc:{bid}:gl{r['id']}")] for r in lists[:40]]
+        rows.append([InlineKeyboardButton(text="← Назад",
+                                          callback_data=f"bc:{bid}:back"),
+                     InlineKeyboardButton(text="❌ Отмена",
+                                          callback_data=f"bc:{bid}:cancel")])
+        await c.message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await c.answer()
+        return
+
     target: dict = {}
-    if action == "active":
+    if action.startswith("gl"):
+        lst = db.get_chat_list(int(action[2:]))
+        if not lst:
+            await c.answer("Список не найден — возможно, его удалили.",
+                           show_alert=True)
+            return
+        # Состав запоминаем на момент выбора: уйдёт ровно тем, кого
+        # показали на подтверждении, даже если список правят параллельно.
+        target = {"list_id": lst["id"], "list_name": lst["name"],
+                  "chat_ids": db.chat_list_members(lst["id"])}
+    elif action == "active":
+        # Кнопки больше нет, но под старыми сообщениями она осталась.
         target["active_days"] = 30
     elif action == "chats":
         target["chats"] = True
@@ -2577,6 +2624,24 @@ async def cb_broadcast(c: CallbackQuery) -> None:
 
 
 async def _show_bcast_confirm(message, bid: int, target: dict) -> None:
+    if "list_id" in target:
+        send, skipped = _split_list_chats(target)
+        text = mn.list_broadcast_confirm(
+            target.get("list_name") or "",
+            [_chat_title(x) for x in send], [_chat_title(x) for x in skipped])
+        if not send:
+            db.update_broadcast(bid, status="cancelled")
+            await message.edit_text(text)
+            return
+        await message.edit_text(text, reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🚀 Отправить",
+                                      callback_data=f"bcgo:{bid}")],
+                [InlineKeyboardButton(text="❌ Отмена",
+                                      callback_data=f"bc:{bid}:cancel")],
+            ]))
+        return
+
     if target.get("chats"):
         n = len(db.broadcast_chats(target))
         who = f"рабочих чатов: {n}"
@@ -2618,7 +2683,13 @@ async def cb_broadcast_go(c: CallbackQuery) -> None:
                      message_ids=b["message_ids"] or [],
                      items=b["items"] or [], html=b["html"] or "")
 
-    if target.get("chats"):
+    if "list_id" in target:
+        # Тем же путём, что «В рабочие чаты»: копия в группу на её языке.
+        # Закрепление проверяем ещё раз — группу могли открепить, пока
+        # человек смотрел на подтверждение.
+        send, _ = _split_list_chats(target)
+        targets = [(chat_id, chat_lang(chat_id)) for chat_id in send]
+    elif target.get("chats"):
         # В группе язык общий, поэтому берём тот, что закреплён за чатом.
         targets = [(chat_id, chat_lang(chat_id))
                    for chat_id, _ in db.broadcast_chats(target)]
@@ -2640,6 +2711,171 @@ async def cb_broadcast_go(c: CallbackQuery) -> None:
     await c.message.edit_text(
         f"✅ <b>Рассылка завершена</b>\n"
         f"Доставлено: {sent}\nНе доставлено: {failed}")
+
+
+# ==========================================================================
+# Списки групп для рассылок
+# ==========================================================================
+
+def _bound_chat_ids() -> set[int]:
+    """Группы, закреплённые за агентством, — те же, что «В рабочие чаты»."""
+    return {chat_id for chat_id, _ in db.broadcast_chats({})}
+
+
+def _chat_title(chat_id: int) -> str:
+    row = db.get_chat(chat_id)
+    return (row["title"] if row and row["title"] else None) or str(chat_id)
+
+
+def _split_list_chats(target: dict) -> tuple[list[int], list[int]]:
+    """Кому из списка уходит рассылка, а кто пропущен как откреплённый."""
+    bound = _bound_chat_ids()
+    ids = target.get("chat_ids") or []
+    return ([x for x in ids if x in bound], [x for x in ids if x not in bound])
+
+
+def _list_screen(list_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
+    lst = db.get_chat_list(list_id)
+    if not lst:
+        return None
+    bound = _bound_chat_ids()
+    members = set(db.chat_list_members(list_id))
+    groups = [(r["chat_id"], r["title"] or str(r["chat_id"]))
+              for r in db.list_chats() if r["chat_id"] in bound]
+    groups.sort(key=lambda g: g[1].lower())
+    text = mn.chat_list_text(lst["name"], len(members), len(groups),
+                             len(members - bound))
+    return text, InlineKeyboardMarkup(
+        inline_keyboard=mn.chat_list_kb(list_id, groups, members))
+
+
+def _lists_home() -> tuple[str, InlineKeyboardMarkup]:
+    lists = db.list_chat_lists()
+    return (mn.chat_lists_text(lists),
+            InlineKeyboardMarkup(inline_keyboard=mn.chat_lists_kb(lists)))
+
+
+@dp.callback_query(F.data.startswith("gl:"))
+async def cb_chat_lists(c: CallbackQuery) -> None:
+    """
+    «💬 Группы → 📋 Списки групп»: собрать, переименовать, удалить.
+
+    Здесь только правка списков. Отправка по списку — в «Рассылке»,
+    по кнопке «🚀 Отправить», и больше нигде.
+    """
+    if not c.from_user or not has_menu(c.from_user.id):
+        await c.answer("Недоступно", show_alert=True)
+        return
+
+    parts = c.data.split(":")
+    action = parts[1]
+    list_id = int(parts[2]) if len(parts) > 2 else None
+
+    async def show(text: str, kb: InlineKeyboardMarkup) -> None:
+        try:
+            await c.message.edit_text(text, reply_markup=kb)
+        except Exception:  # noqa: BLE001
+            await c.message.answer(text, reply_markup=kb)
+
+    if action == "home":
+        await _list_bound_chats()
+        await show(*_lists_home())
+        await c.answer()
+        return
+
+    if action == "new":
+        _awaiting_broadcast.pop(c.from_user.id, None)
+        db.set_meta(f"await_glist:{c.from_user.id}", "new")
+        await show("📋 Как назвать новый список? Пришлите название "
+                   "одним сообщением.\n\nОтмена: /cancel",
+                   InlineKeyboardMarkup(inline_keyboard=[[
+                       InlineKeyboardButton(text="← Списки",
+                                            callback_data="gl:home")]]))
+        await c.answer()
+        return
+
+    lst = db.get_chat_list(list_id) if list_id is not None else None
+    if not lst:
+        await c.answer("Список не найден — возможно, его удалили.",
+                       show_alert=True)
+        await show(*_lists_home())
+        return
+
+    if action == "ren":
+        _awaiting_broadcast.pop(c.from_user.id, None)
+        db.set_meta(f"await_glist:{c.from_user.id}", f"ren:{list_id}")
+        await show(f"✏️ Новое название для списка "
+                   f"<b>{texts.esc(lst['name'])}</b>?\n\nОтмена: /cancel",
+                   InlineKeyboardMarkup(inline_keyboard=[[
+                       InlineKeyboardButton(text="← Назад",
+                                            callback_data=f"gl:open:{list_id}")]]))
+        await c.answer()
+        return
+
+    if action == "del":
+        await show(f"🗑 Точно удалить список <b>{texts.esc(lst['name'])}</b>?"
+                   "\n\nСами группы останутся, удалится только список.",
+                   InlineKeyboardMarkup(inline_keyboard=[
+                       [InlineKeyboardButton(
+                           text="🗑 Да, удалить",
+                           callback_data=f"gl:delok:{list_id}")],
+                       [InlineKeyboardButton(
+                           text="← Нет, оставить",
+                           callback_data=f"gl:open:{list_id}")]]))
+        await c.answer()
+        return
+
+    if action == "delok":
+        db.delete_chat_list(list_id)
+        await show(*_lists_home())
+        await c.answer("Список удалён")
+        return
+
+    if action == "t" and len(parts) > 3:
+        chat_id = int(parts[3])
+        if chat_id not in _bound_chat_ids():
+            await c.answer("Группа не закреплена за агентством",
+                           show_alert=True)
+            return
+        db.toggle_chat_in_list(list_id, chat_id)
+
+    screen = _list_screen(list_id)
+    if screen:
+        await show(*screen)
+    await c.answer()
+
+
+async def try_chat_list_name_reply(m: Message) -> bool:
+    """Прислали название нового списка или новое имя для старого."""
+    if not m.from_user:
+        return False
+    uid = m.from_user.id
+    raw = db.get_meta(f"await_glist:{uid}")
+    if not raw:
+        return False
+    if not has_menu(uid):
+        db.set_meta(f"await_glist:{uid}", "")
+        return False
+    name = " ".join((m.text or "").split())[:60]
+    if not name or name.startswith("/"):
+        return False
+
+    db.set_meta(f"await_glist:{uid}", "")
+    if raw.startswith("ren:"):
+        list_id = int(raw[4:])
+        if not db.get_chat_list(list_id):
+            await m.reply("Этого списка уже нет — возможно, его удалили.")
+            return True
+        db.rename_chat_list(list_id, name)
+        done = f"✅ Список переименован: <b>{texts.esc(name)}</b>."
+    else:
+        list_id = db.create_chat_list(name)
+        done = (f"✅ Список <b>{texts.esc(name)}</b> создан. "
+                "Откройте его и отметьте группы.")
+    await m.reply(done, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📋 Открыть список",
+                             callback_data=f"gl:open:{list_id}")]]))
+    return True
 
 
 # ==========================================================================

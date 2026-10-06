@@ -233,6 +233,24 @@ CREATE TABLE IF NOT EXISTS chats (
     PRIMARY KEY (account_id, chat_id)
 );
 
+-- Сохранённые списки групп для рассылок: «Бали», «крупные агентства».
+-- Группа может быть в нескольких списках. В списке хранится только номер
+-- группы; закреплена ли она за агентством — проверяется при отправке,
+-- поэтому откреплённая группа рассылку не получит, даже оставшись здесь.
+CREATE TABLE IF NOT EXISTS chat_lists (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_list_items (
+    account_id INTEGER NOT NULL,
+    list_id    INTEGER NOT NULL,
+    chat_id    INTEGER NOT NULL,
+    PRIMARY KEY (account_id, list_id, chat_id)
+);
+
 -- Обслуживание клиентов. Живёт ТОЛЬКО в базе оператора: биллинг ведётся
 -- из его бота, а базы клиентов трогаются лишь на чтение — иначе у файла
 -- окажется два хозяина.
@@ -274,6 +292,11 @@ CREATE TABLE IF NOT EXISTS billing_periods (
 """
 
 #: Колонки, добавленные после первого релиза. Ключ — таблица.
+#:
+#: Новые таблицы сюда не пишутся: их создаёт CREATE TABLE IF NOT EXISTS
+#: из SCHEMA при каждом запуске, в том числе на старой боевой базе.
+#: Так появились chats, staff, billing и chat_lists. Здесь — только
+#: колонки, которых нет в уже существующих таблицах.
 MIGRATIONS = {
     "agents": [
         ("amo_contact_id", "INTEGER"),
@@ -1360,6 +1383,66 @@ class Db:
                 continue
             out.append((chat_id, agency_id))
         return out
+
+    # ================= списки групп =================
+
+    def create_chat_list(self, name: str) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO chat_lists (account_id, name, created_at)"
+            " VALUES (?,?,?)", (self.account_id, name, int(time.time())))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_chat_list(self, list_id: int):
+        return self.conn.execute(
+            "SELECT * FROM chat_lists WHERE id=? AND account_id=?",
+            (list_id, self.account_id)).fetchone()
+
+    def list_chat_lists(self) -> list:
+        """Все списки с числом групп в каждом, по названию."""
+        return list(self.conn.execute(
+            "SELECT l.id, l.name, COUNT(i.chat_id) AS count"
+            " FROM chat_lists l LEFT JOIN chat_list_items i"
+            "   ON i.list_id = l.id AND i.account_id = l.account_id"
+            " WHERE l.account_id=? GROUP BY l.id ORDER BY l.name, l.id",
+            (self.account_id,)))
+
+    def rename_chat_list(self, list_id: int, name: str) -> None:
+        self.conn.execute(
+            "UPDATE chat_lists SET name=? WHERE id=? AND account_id=?",
+            (name, list_id, self.account_id))
+        self.conn.commit()
+
+    def delete_chat_list(self, list_id: int) -> None:
+        """Удаляет список. Сами группы и их закрепления не трогаются."""
+        self.conn.execute(
+            "DELETE FROM chat_list_items WHERE list_id=? AND account_id=?",
+            (list_id, self.account_id))
+        self.conn.execute(
+            "DELETE FROM chat_lists WHERE id=? AND account_id=?",
+            (list_id, self.account_id))
+        self.conn.commit()
+
+    def chat_list_members(self, list_id: int) -> list[int]:
+        return [r["chat_id"] for r in self.conn.execute(
+            "SELECT chat_id FROM chat_list_items"
+            " WHERE list_id=? AND account_id=? ORDER BY chat_id DESC",
+            (list_id, self.account_id))]
+
+    def toggle_chat_in_list(self, list_id: int, chat_id: int) -> bool:
+        """Добавить группу в список или убрать. Возвращает: теперь в списке."""
+        cur = self.conn.execute(
+            "DELETE FROM chat_list_items"
+            " WHERE account_id=? AND list_id=? AND chat_id=?",
+            (self.account_id, list_id, chat_id))
+        if cur.rowcount:
+            self.conn.commit()
+            return False
+        self.conn.execute(
+            "INSERT INTO chat_list_items (account_id, list_id, chat_id)"
+            " VALUES (?,?,?)", (self.account_id, list_id, chat_id))
+        self.conn.commit()
+        return True
 
     def stats(self) -> dict:
         q = lambda sql: self.conn.execute(  # noqa: E731

@@ -18,7 +18,9 @@ ALBUM_WAIT секунд и только потом собираем рассыл
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import logging
+import re
 from dataclasses import dataclass, field
 
 from aiogram.types import (InputMediaAnimation, InputMediaAudio,
@@ -34,6 +36,13 @@ ALBUM_WAIT = 1.5
 RATE = 20
 #: Пауза между пачками.
 BATCH_PAUSE = 1.0
+
+#: Лимит подписи к медиа. Telegram считает его по видимому тексту —
+#: без тегов, в единицах UTF-16 (эмодзи идёт за два), — а не по длине
+#: размеченной строки.
+CAPTION_LIMIT = 1024
+
+_TAG = re.compile(r"<[^>]+>")
 
 _MEDIA_CLASS = {
     "photo": InputMediaPhoto,
@@ -103,6 +112,16 @@ def build_draft(messages: list[Message]) -> Draft:
     return draft
 
 
+def visible_len(html: str) -> int:
+    """Длина текста так, как её считает Telegram: без тегов, в UTF-16."""
+    text = _html.unescape(_TAG.sub("", html or ""))
+    return len(text.encode("utf-16-le")) // 2
+
+
+def fits_caption(html: str) -> bool:
+    return visible_len(html) <= CAPTION_LIMIT
+
+
 def to_input_media(items: list[dict], caption: str | None) -> list:
     """Готовит альбом к отправке, подпись вешается на первый элемент."""
     out = []
@@ -110,7 +129,7 @@ def to_input_media(items: list[dict], caption: str | None) -> list:
         cls = _MEDIA_CLASS.get(it["type"], InputMediaDocument)
         kwargs = {"media": it["file_id"]}
         if i == 0 and caption:
-            kwargs["caption"] = caption[:1024]
+            kwargs["caption"] = caption
             kwargs["parse_mode"] = "HTML"
         out.append(cls(**kwargs))
     return out
@@ -136,10 +155,19 @@ async def send_copy(bot, chat_id: int, draft: Draft) -> None:
 
 
 async def send_translated(bot, chat_id: int, draft: Draft, html: str) -> None:
-    """Те же вложения, но с переведённой подписью."""
+    """
+    Те же вложения, но с переведённой подписью.
+
+    Текст не режем никогда. Влезает в подпись — уходит подписью; не
+    влезает — медиа без подписи, а следом текст отдельным сообщением.
+    Раньше подпись резалась по 1024 знакам размеченной строки, вместе
+    с тегами, и длинная ссылка съедала конец текста молча.
+    """
     if not draft.items:
         await bot.send_message(chat_id, html, disable_web_page_preview=False)
         return
+
+    caption = html if html and fits_caption(html) else None
 
     if len(draft.items) == 1:
         it = draft.items[0]
@@ -147,10 +175,13 @@ async def send_translated(bot, chat_id: int, draft: Draft, html: str) -> None:
             "photo": bot.send_photo, "video": bot.send_video,
             "animation": bot.send_animation, "audio": bot.send_audio,
         }.get(it["type"], bot.send_document)
-        await sender(chat_id, it["file_id"], caption=html[:1024] or None)
-        return
+        await sender(chat_id, it["file_id"], caption=caption)
+    else:
+        await bot.send_media_group(chat_id,
+                                   to_input_media(draft.items, caption))
 
-    await bot.send_media_group(chat_id, to_input_media(draft.items, html))
+    if html and caption is None:
+        await bot.send_message(chat_id, html, disable_web_page_preview=True)
 
 
 async def deliver(bot, targets: list[tuple[int, str]], draft: Draft,

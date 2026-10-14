@@ -268,3 +268,145 @@ async def test_delivery_counts_failures_and_reports_them():
     assert (sent, failed) == (2, 1)
     assert seen == [20]
     assert bot.copies == [10, 30]      # остальные всё равно получили
+
+
+# ===================== длинный перевод =====================
+#
+# 14.10.2026, Eco Invest: англоязычные группы получили перевод рассылки
+# обрезанным. Подпись к фото резалась срезом html[:1024] — а 1024 у
+# Telegram считается по видимому тексту, без тегов. Ссылка с длинным
+# адресом съедала половину лимита, и конец текста пропадал молча.
+
+class RecordingBot:
+    """Записывает всё, что ушло адресату, по порядку."""
+
+    def __init__(self):
+        self.sent: list[tuple[str, str | None]] = []
+
+    async def send_message(self, chat_id, text, **kw):
+        self.sent.append(("text", text))
+
+    async def send_photo(self, chat_id, file_id, caption=None, **kw):
+        self.sent.append(("photo", caption))
+
+    async def send_video(self, chat_id, file_id, caption=None, **kw):
+        self.sent.append(("video", caption))
+
+    send_animation = send_audio = send_document = send_video
+
+    async def send_media_group(self, chat_id, media):
+        self.sent.append(("album", media[0].caption))
+        for extra in media[1:]:
+            assert extra.caption is None
+
+    def all_text(self) -> str:
+        return "".join(t or "" for _, t in self.sent)
+
+
+LONG_HREF = "https://example.com/offer?" + "x" * 600
+
+
+def test_visible_length_ignores_tags_and_counts_like_telegram():
+    """Лимит Telegram — видимые символы; эмодзи считается за два."""
+    assert bc.visible_len(f'<b>Hi</b> <a href="{LONG_HREF}">link</a>') == 7
+    assert bc.visible_len("a &amp; b") == 5
+    assert bc.visible_len("🎉") == 2
+
+
+@pytest.mark.asyncio
+async def test_caption_with_long_links_is_sent_whole():
+    """Подпись в лимите по видимому тексту уходит целиком, под фото."""
+    html = (f'<b>Unit offer</b>: <a href="{LONG_HREF}">link</a>\n'
+            + "Sea view. " * 60 + "THE END")
+    assert len(html) > 1024 and bc.visible_len(html) <= 1024
+    bot = RecordingBot()
+    draft = bc.Draft(src_chat_id=-1, message_ids=[1],
+                     items=[{"type": "photo", "file_id": "ph"}], html="ру")
+
+    await bc.send_translated(bot, 20, draft, html)
+
+    assert bot.sent == [("photo", html)]
+
+
+@pytest.mark.asyncio
+async def test_translation_too_long_for_a_caption_is_not_cut():
+    """Не влезает в подпись — фото без подписи, следом текст целиком."""
+    html = "<b>Unit offer</b>\n" + "Sea view, quiet area. " * 70 + "THE END"
+    assert bc.visible_len(html) > 1024
+    bot = RecordingBot()
+    draft = bc.Draft(src_chat_id=-1, message_ids=[1],
+                     items=[{"type": "photo", "file_id": "ph"}], html="ру")
+
+    await bc.send_translated(bot, 20, draft, html)
+
+    assert bot.sent == [("photo", None), ("text", html)]
+
+
+@pytest.mark.asyncio
+async def test_album_with_a_long_translation_is_not_cut():
+    html = "Sea view, quiet area. " * 70 + "THE END"
+    bot = RecordingBot()
+    draft = bc.Draft(src_chat_id=-1, message_ids=[1, 2],
+                     items=[{"type": "photo", "file_id": "a"},
+                            {"type": "photo", "file_id": "b"}], html="ру")
+
+    await bc.send_translated(bot, 20, draft, html)
+
+    assert bot.sent == [("album", None), ("text", html)]
+
+
+def test_no_caption_is_cut_by_raw_length():
+    """Срез по длине размеченного текста рвёт и текст, и теги."""
+    import inspect
+
+    src = inspect.getsource(bc)
+    assert "[:1024]" not in src
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+@pytest.mark.asyncio
+async def test_translation_stopped_by_the_length_limit_is_not_used(monkeypatch):
+    """
+    Модель упёрлась в max_tokens — перевод оборван. Лучше отправить
+    оригинал целиком, чем английский без конца.
+    """
+    import llm
+
+    clf = llm.Classifier("test-key")
+
+    async def fake_post(url, json=None, timeout=None):
+        return _FakeResponse({"stop_reason": "max_tokens",
+                              "content": [{"type": "text", "text": "Unit off"}]})
+
+    monkeypatch.setattr(clf._client, "post", fake_post)
+    try:
+        assert await clf.translate("Оффер на юнит, вид на море") is None
+    finally:
+        await clf.close()
+
+
+@pytest.mark.asyncio
+async def test_complete_translation_is_used(monkeypatch):
+    import llm
+
+    clf = llm.Classifier("test-key")
+
+    async def fake_post(url, json=None, timeout=None):
+        return _FakeResponse({"stop_reason": "end_turn",
+                              "content": [{"type": "text", "text": "Unit offer"}]})
+
+    monkeypatch.setattr(clf._client, "post", fake_post)
+    try:
+        assert await clf.translate("Оффер на юнит") == "Unit offer"
+    finally:
+        await clf.close()

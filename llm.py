@@ -109,8 +109,19 @@ class Classifier:
             # без перевода она всё равно уйдёт — в оригинале.
             r = await self._client.post(API_URL, json=body, timeout=45.0)
             r.raise_for_status()
-            return r.json()["content"][0]["text"].strip()
+            data = r.json()
         except Exception as e:  # noqa: BLE001
+            log.warning("перевод не удался: %s", e)
+            return None
+        # Упёрлись в max_tokens — перевод оборван на полуслове. Такой
+        # уходить не должен: лучше оригинал целиком, чем английский
+        # без конца.
+        if data.get("stop_reason") == "max_tokens":
+            log.warning("перевод оборван по длине, уйдёт оригинал")
+            return None
+        try:
+            return data["content"][0]["text"].strip()
+        except (KeyError, IndexError, TypeError) as e:
             log.warning("перевод не удался: %s", e)
             return None
 

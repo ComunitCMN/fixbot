@@ -19,3 +19,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+
+# Личные разрешения Claude Code на этом маке. Общие правила — в
+# .claude/settings.json, он в git.
+.claude/settings.local.json

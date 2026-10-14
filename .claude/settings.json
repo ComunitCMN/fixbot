@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Edit(.env)",
+      "Read(*.db)",
+      "Read(*.db-wal)",
+      "Read(*.db-shm)",
+      "Read(*.db-journal)",
+      "Edit(*.db)",
+      "Bash(ssh *)",
+      "Bash(scp *)",
+      "Bash(sftp *)",
+      "Bash(rsync *)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push --force-with-lease *)",
+      "Bash(git tag -d *)",
+      "Bash(git push --delete *)",
+      "Bash(git filter-branch *)",
+      "Bash(sqlite3 *)"
+    ],
+    "ask": [
+      "Read(*.log)",
+      "Bash(git push *)",
+      "Bash(git reset --hard *)",
+      "Bash(git checkout -- *)",
+      "Bash(git clean *)",
+      "Bash(rm *)",
+      "Bash(./сохранить.sh *)"
+    ]
+  }
+}

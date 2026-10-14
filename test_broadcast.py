@@ -219,15 +219,22 @@ def test_long_html_is_never_truncated_mid_tag():
     сообщение с обрезкой по длине. Обрезка рвала тег посередине,
     Telegram отказывался принимать такое, и рассылка вставала.
     Теперь превью — настоящие сообщения, обрезки нет вовсе.
+
+    С репостом превью вынесено из try_capture_broadcast в отдельную
+    функцию, и появилось превью перевода у репоста — проверяем все.
     """
     import inspect
 
     import bot
 
-    src = inspect.getsource(bot.try_capture_broadcast)
+    src = "".join(inspect.getsource(f) for f in (
+        bot.try_capture_broadcast, bot._bcast_preview_copy,
+        bot.cb_broadcast_mode))
     assert "draft.html[:" not in src
     assert "html_en[:" not in src
-    assert "send_copy" in src and "send_translated" in src
+    assert "_bcast_preview_copy" in inspect.getsource(bot.try_capture_broadcast)
+    preview = inspect.getsource(bot._bcast_preview_copy)
+    assert "send_copy" in preview and "send_translated" in preview
 
 
 @pytest.mark.asyncio

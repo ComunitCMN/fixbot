@@ -2429,6 +2429,8 @@ async def cmd_broadcast(m: Message) -> None:
         "у агентов. Можно с фото, видео, альбомом и любым оформлением.\n\n"
         "Русскоязычным уйдёт точная копия, англоязычным — те же вложения "
         "с переводом подписи.\n\n"
+        "Пост из канала можно отправить и репостом — с плашкой канала, "
+        "по которой агенты перейдут в него. Бот спросит.\n\n"
         "Отмена: /cancel")
 
 
@@ -2502,7 +2504,51 @@ async def try_capture_broadcast(m: Message) -> bool:
     bid = db.create_broadcast(m.from_user.id, draft.src_chat_id,
                               draft.message_ids, draft.items, draft.html)
 
-    note = await m.answer("Перевожу на английский…")
+    # Пост из канала можно отправить репостом — спрашиваем, как.
+    # Обычное сообщение идёт как всегда, без нового вопроса.
+    if any(_from_channel(x) for x in messages):
+        await m.answer(
+            "📣 Это пост из канала. Как отправить?\n\n"
+            "🔁 <b>Репостом</b> — у агентов сверху будет видно, из какого "
+            "канала пост, и по плашке можно перейти в канал.\n"
+            "🌐 <b>Копией с переводом</b> — как обычная рассылка: "
+            "англоязычным уйдёт перевод.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔁 Репостом из канала",
+                                      callback_data=f"bcm:{bid}:repost")],
+                [InlineKeyboardButton(text="🌐 Копией с переводом",
+                                      callback_data=f"bcm:{bid}:copy")],
+                [InlineKeyboardButton(text="❌ Отмена",
+                                      callback_data=f"bc:{bid}:cancel")],
+            ]))
+        return True
+
+    await _bcast_preview_copy(m, bid, draft)
+    return True
+
+
+def _from_channel(m: Message) -> bool:
+    """Переслано из канала — тогда у поста есть плашка, которую стоит сохранить."""
+    origin = getattr(m, "forward_origin", None)
+    return getattr(origin, "type", None) == "channel"
+
+
+def _bcast_draft(b: dict) -> bc.Draft:
+    return bc.Draft(src_chat_id=b["src_chat_id"],
+                    message_ids=b["message_ids"] or [],
+                    items=b["items"] or [], html=b["html"] or "",
+                    mode=b.get("mode") or bc.COPY)
+
+
+async def _bcast_ask_targets(msg, bid: int, draft: bc.Draft) -> None:
+    await msg.answer(
+        f"📣 Вложений: {len(draft.items)}\n\nКому отправляем?",
+        reply_markup=_bcast_target_kb(bid))
+
+
+async def _bcast_preview_copy(msg, bid: int, draft: bc.Draft) -> None:
+    """Перевод и превью обычной рассылки: копия русским, перевод англоязычным."""
+    note = await msg.answer("Перевожу на английский…")
     html_en = await clf.translate(draft.html) if draft.html else ""
     db.update_broadcast(bid, html_en=html_en or "")
 
@@ -2511,23 +2557,116 @@ async def try_capture_broadcast(m: Message) -> bool:
     # обрезка рвала тег посередине, и Telegram отказывался это принимать.
     try:
         await note.edit_text("👀 <b>Так увидят русскоязычные агенты:</b>")
-        await bc.send_copy(bot, m.chat.id, draft)
+        await bc.send_copy(bot, msg.chat.id, draft)
 
         if html_en and html_en != draft.html:
-            await m.answer("👀 <b>Так увидят англоязычные:</b>")
-            await bc.send_translated(bot, m.chat.id, draft, html_en)
+            await msg.answer("👀 <b>Так увидят англоязычные:</b>")
+            await bc.send_translated(bot, msg.chat.id, draft, html_en)
         elif draft.html:
-            await m.answer("<i>Перевести не удалось — англоязычным уйдёт "
-                           "оригинал.</i>")
+            await msg.answer("<i>Перевести не удалось — англоязычным уйдёт "
+                             "оригинал.</i>")
     except Exception as e:  # noqa: BLE001
         log.exception("не смог показать превью")
-        await m.answer(f"Не смог показать превью: {texts.esc(str(e))[:200]}\n"
-                       "Рассылку всё равно можно отправить.")
+        await msg.answer(f"Не смог показать превью: {texts.esc(str(e))[:200]}\n"
+                         "Рассылку всё равно можно отправить.")
 
-    await m.answer(
-        f"📣 Вложений: {len(draft.items)}\n\nКому отправляем?",
-        reply_markup=_bcast_target_kb(bid))
-    return True
+    await _bcast_ask_targets(msg, bid, draft)
+
+
+@dp.callback_query(F.data.startswith("bcm:"))
+async def cb_broadcast_mode(c: CallbackQuery) -> None:
+    """
+    Способ отправки поста из канала.
+
+    repost — превью настоящим репостом и предупреждение, что
+    англоязычные получат его на русском; дальше all (репост всем) или
+    en (англоязычным переведённая копия). copy — обычная рассылка.
+    """
+    _, bid_s, action = c.data.split(":", 2)
+    bid = int(bid_s)
+    b = db.get_broadcast(bid)
+    if not b or not has_menu(c.from_user.id):
+        await c.answer("Недоступно", show_alert=True)
+        return
+    if b["status"] != "draft":
+        await c.answer("Уже отправлено", show_alert=True)
+        return
+    await c.answer()
+    draft = _bcast_draft(b)
+    msg = c.message
+
+    if action == "copy":
+        db.update_broadcast(bid, mode=bc.COPY)
+        await msg.edit_text("🌐 Отправляем копией с переводом.")
+        await _bcast_preview_copy(msg, bid, draft)
+        return
+
+    if action == "repost":
+        await msg.edit_text("🔁 Отправляем репостом из канала.")
+        try:
+            await msg.answer("👀 <b>Так увидят агенты:</b>")
+            await bc.send_repost(bot, msg.chat.id, draft)
+        except Exception as e:  # noqa: BLE001
+            # Не дал переслать один раз — не даст и при отправке. Говорим
+            # сейчас, а не после «🚀», когда рассылка уйдёт в ошибки.
+            log.info("репост не прошёл: %s", str(e)[:200])
+            await msg.answer(
+                "Telegram не дал переслать этот пост — похоже, в канале "
+                "запрещена пересылка. Можно отправить копией с переводом.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🌐 Копией с переводом",
+                                          callback_data=f"bcm:{bid}:copy")],
+                    [InlineKeyboardButton(text="❌ Отмена",
+                                          callback_data=f"bc:{bid}:cancel")],
+                ]))
+            return
+
+        if not draft.html:
+            # Без текста переводить нечего и предупреждать не о чем.
+            db.update_broadcast(bid, mode=bc.REPOST)
+            await _bcast_ask_targets(msg, bid, draft)
+            return
+
+        await msg.answer(
+            "⚠️ Англоязычные группы и агенты получат этот пост "
+            "<b>на русском</b>: репост перевести нельзя.\n\n"
+            "Можно оставить так, а можно англоязычным вместо репоста "
+            "отправить переведённую копию — без плашки канала.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔁 Отправить репост всем",
+                                      callback_data=f"bcm:{bid}:all")],
+                [InlineKeyboardButton(text="🌐 Англоязычным — перевод",
+                                      callback_data=f"bcm:{bid}:en")],
+                [InlineKeyboardButton(text="❌ Отмена",
+                                      callback_data=f"bc:{bid}:cancel")],
+            ]))
+        return
+
+    if action == "all":
+        db.update_broadcast(bid, mode=bc.REPOST, html_en="")
+        await msg.edit_text("🔁 Репост всем, англоязычным тоже на русском.")
+        await _bcast_ask_targets(msg, bid, draft)
+        return
+
+    if action == "en":
+        db.update_broadcast(bid, mode=bc.REPOST_EN)
+        await msg.edit_text("🔁 Русским — репост, 🌐 англоязычным — перевод.")
+        note = await msg.answer("Перевожу на английский…")
+        html_en = await clf.translate(draft.html)
+        db.update_broadcast(bid, html_en=html_en or "")
+        try:
+            if html_en and html_en != draft.html:
+                await note.edit_text("👀 <b>Так увидят англоязычные:</b>")
+                await bc.send_translated(bot, msg.chat.id, draft, html_en)
+            else:
+                await note.edit_text("<i>Перевести не удалось — "
+                                     "англоязычным уйдёт репост.</i>")
+        except Exception as e:  # noqa: BLE001
+            log.exception("не смог показать превью перевода")
+            await msg.answer(f"Не смог показать превью: "
+                             f"{texts.esc(str(e))[:200]}\n"
+                             "Рассылку всё равно можно отправить.")
+        await _bcast_ask_targets(msg, bid, draft)
 
 
 def _bcast_target_kb(bid: int) -> InlineKeyboardMarkup:
@@ -2623,12 +2762,25 @@ async def cb_broadcast(c: CallbackQuery) -> None:
     await c.answer()
 
 
+def _bcast_mode_note(bid: int) -> str:
+    """Строка на подтверждении: уйдёт репост, а не копия. У копии — пусто."""
+    b = db.get_broadcast(bid) or {}
+    mode = b.get("mode") or bc.COPY
+    if mode == bc.REPOST:
+        return "\n\n🔁 Уйдёт репостом из канала, англоязычным тоже на русском."
+    if mode == bc.REPOST_EN:
+        return "\n\n🔁 Русским — репост из канала, 🌐 англоязычным — перевод."
+    return ""
+
+
 async def _show_bcast_confirm(message, bid: int, target: dict) -> None:
     if "list_id" in target:
         send, skipped = _split_list_chats(target)
         text = mn.list_broadcast_confirm(
             target.get("list_name") or "",
             [_chat_title(x) for x in send], [_chat_title(x) for x in skipped])
+        if send:
+            text += _bcast_mode_note(bid)
         if not send:
             db.update_broadcast(bid, status="cancelled")
             await message.edit_text(text)
@@ -2658,7 +2810,7 @@ async def _show_bcast_confirm(message, bid: int, target: dict) -> None:
         return
 
     await message.edit_text(
-        f"Получателей — {who}.\n\nОтправляем?",
+        f"Получателей — {who}.{_bcast_mode_note(bid)}\n\nОтправляем?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🚀 Отправить",
                                   callback_data=f"bcgo:{bid}")],
@@ -2679,9 +2831,7 @@ async def cb_broadcast_go(c: CallbackQuery) -> None:
         return
 
     target = b["target"] or {}
-    draft = bc.Draft(src_chat_id=b["src_chat_id"],
-                     message_ids=b["message_ids"] or [],
-                     items=b["items"] or [], html=b["html"] or "")
+    draft = _bcast_draft(b)
 
     if "list_id" in target:
         # Тем же путём, что «В рабочие чаты»: копия в группу на её языке.

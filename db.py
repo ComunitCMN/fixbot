@@ -330,6 +330,13 @@ MIGRATIONS = {
         # по-прежнему идёт по всем агентским воронкам.
         ("is_target", "INTEGER"),
     ],
+    "broadcasts": [
+        # Способ отправки: copy — копия и перевод, как было всегда;
+        # repost — пересылка с плашкой канала всем; repost_en — русским
+        # пересылка, англоязычным переведённая копия. Пусто — copy:
+        # черновики, начатые до правки, уходят как задумано.
+        ("mode", "TEXT"),
+    ],
     "fixations": [
         # Последний известный этап сделки — по нему ловим изменения.
         ("last_status_id", "INTEGER"),
@@ -1331,7 +1338,7 @@ class Db:
         return out
 
     def update_broadcast(self, bid: int, **fields) -> None:
-        allowed = {"html_en", "target", "status", "sent", "failed"}
+        allowed = {"html_en", "target", "status", "sent", "failed", "mode"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
             return

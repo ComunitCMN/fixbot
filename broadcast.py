@@ -11,6 +11,12 @@
 с общим media_group_id. Поэтому после первого куска ждём остальные
 ALBUM_WAIT секунд и только потом собираем рассылку.
 
+Пост, пересланный из канала, можно отправить и репостом: тогда у
+агентов сверху плашка «Переслано из …», и по ней переходят в канал.
+Боту для этого не нужно быть в канале — пересылка уже пересланного
+сообщения сохраняет исходный канал. Репост перевести нельзя, поэтому
+у него два варианта: всем как есть или англоязычным переведённая копия.
+
 Ограничения Telegram: примерно 30 сообщений в секунду. Шлём пачками
 с паузами, иначе часть адресатов просто не получит письмо.
 """
@@ -44,6 +50,13 @@ CAPTION_LIMIT = 1024
 
 _TAG = re.compile(r"<[^>]+>")
 
+#: Способы отправки. Копия — как было всегда: русским копия один в один,
+#: англоязычным перевод. Репост — пересылка с плашкой канала всем.
+#: Репост с переводом — русским пересылка, англоязычным переведённая копия.
+COPY = "copy"
+REPOST = "repost"
+REPOST_EN = "repost_en"
+
 _MEDIA_CLASS = {
     "photo": InputMediaPhoto,
     "video": InputMediaVideo,
@@ -61,6 +74,7 @@ class Draft:
     message_ids: list[int] = field(default_factory=list)
     items: list[dict] = field(default_factory=list)
     html: str = ""
+    mode: str = COPY
 
     @property
     def has_media(self) -> bool:
@@ -154,6 +168,23 @@ async def send_copy(bot, chat_id: int, draft: Draft) -> None:
                                message_id=mid)
 
 
+async def send_repost(bot, chat_id: int, draft: Draft) -> None:
+    """Пересылка с плашкой канала. Альбом — альбомом."""
+    if len(draft.message_ids) > 1:
+        try:
+            await bot.forward_messages(chat_id=chat_id,
+                                       from_chat_id=draft.src_chat_id,
+                                       message_ids=draft.message_ids)
+            return
+        except Exception:  # noqa: BLE001
+            log.info("forward_messages не прошёл, пересылаю по одному")
+
+    for mid in draft.message_ids:
+        await bot.forward_message(chat_id=chat_id,
+                                  from_chat_id=draft.src_chat_id,
+                                  message_id=mid)
+
+
 async def send_translated(bot, chat_id: int, draft: Draft, html: str) -> None:
     """
     Те же вложения, но с переведённой подписью.
@@ -196,8 +227,10 @@ async def deliver(bot, targets: list[tuple[int, str]], draft: Draft,
     sent = failed = 0
     for i, (chat_id, lang) in enumerate(targets):
         try:
-            if lang == "en" and html_en:
+            if lang == "en" and html_en and draft.mode != REPOST:
                 await send_translated(bot, chat_id, draft, html_en)
+            elif draft.mode in (REPOST, REPOST_EN):
+                await send_repost(bot, chat_id, draft)
             else:
                 await send_copy(bot, chat_id, draft)
             sent += 1

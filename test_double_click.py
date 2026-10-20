@@ -77,7 +77,7 @@ def _env(b, monkeypatch, tmp_path, fail=False):
         await asyncio.sleep(0.05)          # CRM думает
         return [], None
 
-    async def create_in_amo(payload, p, author_id):
+    async def create_in_amo(payload, p, author_id, d=None):
         await asyncio.sleep(0.05)
         if fail:
             raise RuntimeError("amoCRM: 502 Bad Gateway")

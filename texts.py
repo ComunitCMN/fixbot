@@ -133,6 +133,11 @@ STR: dict[str, dict[str, str]] = {
         "note_expired": ("🟢 Клиент был в базе отдела продаж, но без активности "
                          "с {date} — срок истёк, можно забирать."),
         "note_agencies": " (агентств: {n})",
+        "note_retail": ("🔴 <b>Клиент не уникальный</b> — есть в прямом "
+                        "отделе продаж{since}.\n"
+                        "Зафиксировать всё равно можно: сделка ляжет с "
+                        "пометкой «не уникальный». Уточните у своего "
+                        "менеджера, что делать в этом случае."),
 
         "v_unique": "🟢 <b>Клиент уникальный — зафиксирован</b>",
         "v_other": "🟢 <b>Клиент зафиксирован — работайте</b>",
@@ -166,6 +171,9 @@ STR: dict[str, dict[str, str]] = {
         "since": " с {date}",
 
         "confirmed": "✅ <b>Клиент зафиксирован</b>",
+        "confirmed_not_unique": ("🔴 <i>С пометкой «не уникальный»: клиент "
+                                 "есть в прямом отделе продаж. Уточните у "
+                                 "своего менеджера.</i>"),
         "cancelled": "❌ Отменено. Ничего не записано.",
         "expired": ("⌛️ Подтверждение не получено, заявка снята. "
                     "Если фиксация нужна — отправьте сообщение заново."),
@@ -349,6 +357,11 @@ STR: dict[str, dict[str, str]] = {
                          "has had no activity since {date} — the period has "
                          "expired, they're available."),
         "note_agencies": " ({n} agencies in total)",
+        "note_retail": ("🔴 <b>Client is not new</b> — already with the "
+                        "developer's direct sales team{since}.\n"
+                        "You can still register them: the deal will be "
+                        "marked “not new”. Please check with your manager "
+                        "what to do in this case."),
 
         "v_unique": "🟢 <b>Client registered</b>",
         "v_other": "🟢 <b>Client registered — go ahead</b>",
@@ -383,6 +396,9 @@ STR: dict[str, dict[str, str]] = {
         "since": " since {date}",
 
         "confirmed": "✅ <b>Client registered</b>",
+        "confirmed_not_unique": ("🔴 <i>Marked “not new”: the client is "
+                                 "already with the direct sales team. "
+                                 "Please check with your manager.</i>"),
         "cancelled": "❌ Cancelled. Nothing was saved.",
         "expired": ("⌛️ No confirmation received, the request was dropped. "
                     "Send the message again if you still need it."),
@@ -638,6 +654,12 @@ def confirm_note_other_agency(d: Decision, lang: str = RU) -> str:
 def confirm_note_retail_expired(d: Decision, ttl_days: int = 365,
                                 lang: str = RU) -> str:
     return t(lang, "note_expired", date=when(d.retail_activity, lang))
+
+
+def confirm_note_retail_blocked(d: Decision, lang: str = RU) -> str:
+    since = d.retail_since or d.retail_activity
+    return t(lang, "note_retail",
+             since=t(lang, "since", date=when(since, lang)) if since else "")
 
 
 def confirmed(client: str | None, p: Phone, agency: str | None,

@@ -1047,6 +1047,8 @@ class Db:
             " FROM fixations"
             " WHERE account_id=? AND amo_lead_id IS NOT NULL"
             "   AND agent_telegram_id IS NOT NULL"
+            # Не уникальная фиксация срока не имеет — решение владельца.
+            "   AND COALESCE(verdict, '') <> 'retail_blocked'"
             "   AND COALESCE(renewed_at, created_at) + ? <= ?"
             "   AND (reminded_for IS NULL"
             "        OR reminded_for <> COALESCE(renewed_at, created_at))",
@@ -1085,6 +1087,8 @@ class Db:
             "SELECT * FROM fixations"
             " WHERE account_id=? AND amo_lead_id IS NOT NULL"
             "   AND agent_telegram_id IS NOT NULL"
+            # Клиент и так в прямом отделе — сообщать агенту нечего.
+            "   AND COALESCE(verdict, '') <> 'retail_blocked'"
             "   AND COALESCE(retail_notified, 0) = 0",
             (self.account_id,),
         ).fetchall()
@@ -1114,7 +1118,9 @@ class Db:
             "SELECT DISTINCT agent_telegram_id, agency_id, digits, client_name"
             " FROM fixations"
             " WHERE account_id=? AND digits LIKE ? AND amo_lead_id IS NOT NULL"
-            "   AND agent_telegram_id IS NOT NULL",
+            "   AND agent_telegram_id IS NOT NULL"
+            # Не уникальная фиксация уведомлений о конкурентах не получает.
+            "   AND COALESCE(verdict, '') <> 'retail_blocked'",
             (self.account_id, short + "%"),
         ).fetchall()
         return [r for r in rows

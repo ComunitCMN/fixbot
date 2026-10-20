@@ -874,8 +874,10 @@ async def on_message(m: Message) -> None:
 
     # ---------- блокирующие вердикты: отвечаем сразу ----------
     # Спрашивать «хотите зафиксировать?» бессмысленно, если фиксация
-    # всё равно невозможна. Экономим человеку лишний шаг.
-    if not d.creates_fixation:
+    # всё равно невозможна. Экономим человеку лишний шаг. Клиент прямого
+    # отдела сюда больше не попадает: его можно зафиксировать с пометкой
+    # «не уникальный» — по кнопке, как любого другого.
+    if not d.can_fix:
         db.log_fixation(
             digits=p.digits, client_name=client, agency_id=agency_id,
             agent_telegram_id=m.from_user.id, agent_name=author,
@@ -916,6 +918,7 @@ async def on_message(m: Message) -> None:
         vd.Verdict.OTHER_AGENCY: texts.confirm_note_other_agency(d, lang),
         vd.Verdict.RETAIL_EXPIRED: texts.confirm_note_retail_expired(
             d, cfg.retail_ttl_days, lang),
+        vd.Verdict.RETAIL_BLOCKED: texts.confirm_note_retail_blocked(d, lang),
     }.get(d.verdict, "")
 
     card = texts.confirm_card(client=client, p=p, agency=agency_name,
@@ -946,13 +949,19 @@ def _confirm_kb(pending_id: int, has_name: bool = True,
 
 
 async def _create_in_amo(payload: dict, p: phones.Phone,
-                         agent_telegram_id: int) -> dict:
+                         agent_telegram_id: int,
+                         d: vd.Decision | None = None) -> dict:
     """
     Создаёт в amoCRM всё, что нужно для фиксации.
 
     Порядок: компания-агентство → карточка агента → контакт клиента →
     сделка, связанная с клиентом, агентом и агентством.
+
+    Не уникальный клиент (есть в прямом отделе продаж) ложится туда же,
+    в агентскую воронку, но с тегом «не уникальный» и предупреждением
+    первой строкой примечания — менеджер найдёт такие одним фильтром.
     """
+    not_unique = bool(d and d.not_unique)
     agency_id = payload["agency_id"]
     agency_name = payload.get("agency_name")
     client = payload.get("client") or f"Клиент {p.pretty()}"
@@ -1010,16 +1019,23 @@ async def _create_in_amo(payload: dict, p: phones.Phone,
         name=f"{client} — {payload.get('object') or payload.get('chat_title') or 'Telegram'}",
         contact_id=contact_id, company_id=company_id,
         pipeline_id=pipeline_id, status_id=status_id,
-        tags=["telegram-фиксация"], agent_contact_id=agent_contact_id,
+        tags=(["telegram-фиксация", "не уникальный"] if not_unique
+              else ["telegram-фиксация"]),
+        agent_contact_id=agent_contact_id,
         # Не выбран — None, и запрос уходит ровно такой же, как раньше.
         # Дальше правила amoCRM могут переназначить ответственного по
         # своим настройкам: это не конфликт, бот лишь ставит вменяемого
         # хозяина в момент создания.
         responsible_user_id=db.responsible_user_id(),
     )
+    warning = ""
+    if not_unique:
+        since = d.retail_since or d.retail_activity
+        warning = ("⚠️ Не уникальный — клиент есть в прямом отделе продаж"
+                   f"{' с ' + texts.when(since) if since else ''}.\n\n")
     await amo.add_note(
         "leads", lead_id,
-        f"Зафиксирован из Telegram, подтверждено агентом.\n"
+        f"{warning}Зафиксирован из Telegram, подтверждено агентом.\n"
         f"Агентство: {agency_name or '—'}\n"
         f"Агент: {payload.get('author')}"
         f"{' @' + payload['username'] if payload.get('username') else ''}\n"
@@ -1082,7 +1098,7 @@ async def _show_confirm(message, row: dict) -> None:
     d = vd.decide(matches, payload.get("agency_id"), row["author_id"],
                   retail_ttl_days=cfg.retail_ttl_days)
 
-    if not d.creates_fixation:
+    if not d.can_fix:
         db.close_pending(row["id"], "cancelled")
         await message.edit_text(
             texts.render(d, client=payload.get("client") or "—", p=p,
@@ -1096,6 +1112,7 @@ async def _show_confirm(message, row: dict) -> None:
         vd.Verdict.OTHER_AGENCY: texts.confirm_note_other_agency(d, lang),
         vd.Verdict.RETAIL_EXPIRED: texts.confirm_note_retail_expired(
             d, cfg.retail_ttl_days, lang),
+        vd.Verdict.RETAIL_BLOCKED: texts.confirm_note_retail_blocked(d, lang),
     }.get(d.verdict, "")
 
     card = texts.confirm_card(
@@ -1301,7 +1318,7 @@ async def _confirm_claimed(c: CallbackQuery, row: dict, payload: dict,
     matches, _ = await find_all_matches(p)
     d = vd.decide(matches, payload.get("agency_id"), row["author_id"],
                   retail_ttl_days=cfg.retail_ttl_days)
-    if not d.creates_fixation:
+    if not d.can_fix:
         db.close_pending(row["id"], "cancelled")
         await c.message.edit_text(
             "Пока вы думали, ситуация изменилась:\n\n"
@@ -1327,7 +1344,7 @@ async def _confirm_claimed(c: CallbackQuery, row: dict, payload: dict,
         return
 
     try:
-        created = await _create_in_amo(payload, p, row["author_id"])
+        created = await _create_in_amo(payload, p, row["author_id"], d)
     except Exception as e:  # noqa: BLE001
         log.exception("amoCRM")
         # Кнопки возвращаем: сбой связи не должен стоить агенту фиксации.
@@ -1358,6 +1375,8 @@ async def _confirm_claimed(c: CallbackQuery, row: dict, payload: dict,
         if created["agent_contact_id"] else None,
         lang=lang,
     )
+    if d.not_unique:
+        text += "\n\n" + texts.t(lang, "confirmed_not_unique")
     if subscribed:
         text += texts.t(lang, "watch_hint")
     await c.message.edit_text(
@@ -1367,13 +1386,15 @@ async def _confirm_claimed(c: CallbackQuery, row: dict, payload: dict,
     )
 
     # Конкурентам сообщаем сразу: скорость здесь решает, кто доведёт
-    # клиента до депозита первым.
-    try:
-        await notify_rivals_about_new(fixation_id, p.digits,
-                                      payload.get("agency_id"),
-                                      payload.get("client"))
-    except Exception:  # noqa: BLE001
-        log.exception("не смог оповестить конкурентов")
+    # клиента до депозита первым. О не уникальной фиксации — нет:
+    # клиент у прямого отдела, соревноваться не за что.
+    if not d.not_unique:
+        try:
+            await notify_rivals_about_new(fixation_id, p.digits,
+                                          payload.get("agency_id"),
+                                          payload.get("client"))
+        except Exception:  # noqa: BLE001
+            log.exception("не смог оповестить конкурентов")
 
     if d.notifies_admin and d.verdict is vd.Verdict.RETAIL_EXPIRED:
         await notify_admins(texts.admin_retail_expired(

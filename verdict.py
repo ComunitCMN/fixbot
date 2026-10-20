@@ -42,6 +42,16 @@ CREATES_FIXATION = {
     Verdict.RETAIL_EXPIRED,
 }
 
+#: Не уникальные, но фиксировать можно — с пометкой «не уникальный».
+#: Решение владельца 20.10.2026: клиента прямого отдела продаж агент
+#: всё равно может зафиксировать, сделка ляжет в агентскую воронку с
+#: тегом. Счёт — как у всех; уведомлений о конкурентах и прямом отделе
+#: и срока 45 дней у такой фиксации нет. В CREATES_FIXATION не входит
+#: намеренно: «создаёт фиксацию» по-прежнему значит «уникальная».
+FIXES_NOT_UNIQUE = {
+    Verdict.RETAIL_BLOCKED,
+}
+
 #: Вердикты, о которых стоит уведомить администратора.
 NOTIFIES_ADMIN = {
     Verdict.RETAIL_EXPIRED,
@@ -70,6 +80,16 @@ class Decision:
     @property
     def creates_fixation(self) -> bool:
         return self.verdict in CREATES_FIXATION
+
+    @property
+    def not_unique(self) -> bool:
+        """Фиксируем, но с пометкой «не уникальный»."""
+        return self.verdict in FIXES_NOT_UNIQUE
+
+    @property
+    def can_fix(self) -> bool:
+        """Агенту показываем кнопку «Зафиксировать»."""
+        return self.creates_fixation or self.not_unique
 
     @property
     def notifies_admin(self) -> bool:

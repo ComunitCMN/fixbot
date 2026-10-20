@@ -95,6 +95,8 @@ STR: dict[str, dict[str, str]] = {
         "btn_edit_name": "✏️ Изменить имя",
 
         "btn_fix": "✅ Зафиксировать",
+        "fix_in_progress": "⏳ <i>Проверяю и записываю…</i>",
+        "fix_busy": "Уже записываю, секунду…",
         "btn_cancel": "❌ Отмена",
         "btn_back": "← Назад",
 
@@ -309,6 +311,8 @@ STR: dict[str, dict[str, str]] = {
         "btn_edit_name": "✏️ Edit name",
 
         "btn_fix": "✅ Register client",
+        "fix_in_progress": "⏳ <i>Checking and registering…</i>",
+        "fix_busy": "Already registering, one moment…",
         "btn_cancel": "❌ Cancel",
         "btn_back": "← Back",
 

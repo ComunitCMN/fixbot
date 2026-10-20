@@ -157,7 +157,7 @@ CREATE TABLE IF NOT EXISTS pending (
     prompt_id   INTEGER,          -- сообщение бота с кнопками
     author_id   INTEGER NOT NULL, -- кто может подтвердить
     payload     TEXT NOT NULL,    -- JSON с разобранными данными
-    status      TEXT NOT NULL DEFAULT 'waiting',  -- waiting|done|cancelled|expired
+    status      TEXT NOT NULL DEFAULT 'waiting',  -- waiting|processing|done|cancelled|expired
     created_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pending_status ON pending(status, created_at);
@@ -934,12 +934,41 @@ class Db:
             "UPDATE pending SET status=? WHERE id=?", (status, pending_id))
         self.conn.commit()
 
+    def claim_pending(self, pending_id: int) -> bool:
+        """
+        Берёт заявку в работу. True — только у первого нажатия.
+
+        Проверка и пометка — одним запросом. Раньше «обработана» ставилась
+        после записи в CRM, а запись идёт несколько секунд: каждое
+        повторное нажатие проходило проверку и записывало клиента заново.
+        """
+        cur = self.conn.execute(
+            "UPDATE pending SET status='processing'"
+            " WHERE id=? AND account_id=? AND status='waiting'",
+            (pending_id, self.account_id))
+        self.conn.commit()
+        return cur.rowcount == 1
+
+    def release_pending(self, pending_id: int) -> None:
+        """Возвращает взятую заявку в ожидание — после сбоя записи."""
+        self.conn.execute(
+            "UPDATE pending SET status='waiting'"
+            " WHERE id=? AND account_id=? AND status='processing'",
+            (pending_id, self.account_id))
+        self.conn.commit()
+
     def expire_pending(self, older_than_sec: int) -> list[dict]:
-        """Заявки, на которые никто не ответил, — их пора убрать из чата."""
+        """
+        Заявки, на которые никто не ответил, — их пора убрать из чата.
+
+        Сюда же попадают застрявшие в записи: бот перезапустился посреди
+        похода в CRM. Кнопку им не возвращаем — запись могла успеть дойти,
+        и повторное нажатие дало бы дубль.
+        """
         cutoff = int(time.time()) - older_than_sec
         rows = self.conn.execute(
-            "SELECT * FROM pending WHERE account_id=? AND status='waiting'"
-            " AND created_at < ?",
+            "SELECT * FROM pending WHERE account_id=?"
+            " AND status IN ('waiting', 'processing') AND created_at < ?",
             (self.account_id, cutoff),
         ).fetchall()
         out = []

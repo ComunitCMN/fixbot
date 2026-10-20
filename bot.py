@@ -1218,6 +1218,10 @@ async def _load_pending(c: CallbackQuery,
     if not row:
         await c.answer("Заявка не найдена", show_alert=True)
         return None
+    if row["status"] == "processing":
+        await c.answer(texts.t(row["payload"].get("lang") or cfg.default_lang,
+                               "fix_busy"), show_alert=True)
+        return None
     if row["status"] != "waiting":
         await c.answer("Заявка уже обработана", show_alert=True)
         return None
@@ -1247,8 +1251,51 @@ async def cb_confirm(c: CallbackQuery) -> None:
     lang = payload.get("lang") or cfg.default_lang
     p = phones.from_digits(payload["digits"])
 
-    await c.answer("…")
+    # Берём карточку в работу до похода в CRM, одним шагом. Повторные
+    # нажатия, пока идёт запись, сюда не пройдут — иначе каждое
+    # записывало бы клиента заново (так и легли три сделки на одного).
+    if not db.claim_pending(row["id"]):
+        await c.answer(texts.t(lang, "fix_busy"), show_alert=True)
+        return
+    await c.answer()
 
+    # Сразу показываем, что бот работает, и убираем кнопки: CRM думает
+    # несколько секунд, и без этого человек жмёт ещё раз.
+    try:
+        card = getattr(c.message, "html_text", None) or ""
+        await c.message.edit_text(
+            (card + "\n\n" if card else "") + texts.t(lang, "fix_in_progress"),
+            disable_web_page_preview=True)
+    except Exception:  # noqa: BLE001
+        log.info("не смог показать «записываю» — фиксацию это не останавливает")
+
+    try:
+        await _confirm_claimed(c, row, payload, lang, p)
+    except Exception:
+        # Сбой до записи (например, CRM не ответила на повторную
+        # проверку). Кнопки мы уже убрали — возвращаем карточку как была,
+        # иначе она повиснет на «⏳». Ошибку отдаём дальше: её запишет
+        # в лог и покажет общий перехват кнопок.
+        db.release_pending(row["id"])
+        try:
+            kb = _confirm_kb(row["id"], bool(payload.get("client")), lang)
+            if card:
+                await c.message.edit_text(card, reply_markup=kb,
+                                          disable_web_page_preview=True)
+            else:
+                await c.message.edit_reply_markup(reply_markup=kb)
+        except Exception:  # noqa: BLE001
+            log.info("не смог вернуть кнопки на карточку")
+        raise
+    finally:
+        # Ни одна ветка не закрыла заявку (сбой, нет воронки) — вернуть
+        # её в ожидание. Закрытую готовую или отменённую это не трогает.
+        db.release_pending(row["id"])
+
+
+async def _confirm_claimed(c: CallbackQuery, row: dict, payload: dict,
+                           lang: str, p: phones.Phone) -> None:
+    """Запись фиксации — карточка уже взята в работу этим нажатием."""
     # Данные могли измениться, пока карточка висела в чате, —
     # пересчитываем вердикт перед записью.
     matches, _ = await find_all_matches(p)
@@ -1283,8 +1330,12 @@ async def cb_confirm(c: CallbackQuery) -> None:
         created = await _create_in_amo(payload, p, row["author_id"])
     except Exception as e:  # noqa: BLE001
         log.exception("amoCRM")
+        # Кнопки возвращаем: сбой связи не должен стоить агенту фиксации.
+        db.release_pending(row["id"])
         await c.message.edit_text(
-            f"❌ Не смог записать в amoCRM: {texts.esc(str(e))[:300]}")
+            f"❌ Не смог записать в amoCRM: {texts.esc(str(e))[:300]}",
+            reply_markup=_confirm_kb(row["id"], bool(payload.get("client")),
+                                     lang))
         return
 
     db.close_pending(row["id"], "done")

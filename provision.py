@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 #: Настройки, которые наследуются от оператора: они одинаковы у всех
 #: клиентов, и заставлять человека их вводить незачем.
 INHERITED = (
-    "ANTHROPIC_API_KEY", "MODEL", "MIN_CONFIDENCE", "CONFIRM_TTL_MIN",
+    "OPENAI_API_KEY", "OPENAI_MODEL", "MODEL", "MIN_CONFIDENCE", "CONFIRM_TTL_MIN",
     "STATUS_CHECK_MIN", "FIXATION_TTL_DAYS", "RENEW_WARN_DAYS",
     "SYNC_INTERVAL_MIN", "LIVE_LOOKUP", "RETAIL_TTL_DAYS",
     "DEFAULT_REGION", "DEFAULT_LANG", "QUIET", "SHOW_CRM_LINKS",

@@ -1,5 +1,5 @@
 """
-Распознавание фиксации через Claude API.
+Распознавание фиксации и перевод рассылок через OpenAI API.
 
 Правила живут в prompts/fixation.md — обычным текстом. Файл читается на
 каждое сообщение (с кэшем по mtime), так что правила можно править на лету,
@@ -23,8 +23,24 @@ import phones
 
 log = logging.getLogger(__name__)
 
-API_URL = "https://api.anthropic.com/v1/messages"
+API_URL = "https://api.openai.com/v1/responses"
+DEFAULT_MODEL = "gpt-5.4-mini-2026-03-17"
 PROMPT_PATH = Path(__file__).parent / "prompts" / "fixation.md"
+
+# Те же поля, что в Fixation и prompts/fixation.md. Nullable-поля
+# сохраняют прежний контракт: отсутствующие данные не додумываются.
+FIXATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_fixation": {"type": "boolean"},
+        "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        **{name: {"type": ["string", "null"]} for name in (
+            "client_name", "phone", "agency", "object", "comment", "reason")},
+    },
+    "required": ["is_fixation", "confidence", "client_name", "phone",
+                 "agency", "object", "comment", "reason"],
+    "additionalProperties": False,
+}
 
 # Если ничего из этого нет и телефона нет — точно не фиксация, экономим вызов.
 # Слова на обоих языках: агентства бывают и русскоязычные, и англоязычные.
@@ -72,14 +88,13 @@ def prefilter(text: str) -> bool:
 
 
 class Classifier:
-    def __init__(self, api_key: str, model: str = "claude-haiku-4-5-20251001",
+    def __init__(self, api_key: str, model: str = DEFAULT_MODEL,
                  min_confidence: float = 0.6):
         self.model = model
         self.min_confidence = min_confidence
         self._client = httpx.AsyncClient(
             headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
+                "Authorization": f"Bearer {api_key}",
                 "content-type": "application/json",
             },
             timeout=30.0,
@@ -100,30 +115,26 @@ class Classifier:
             return ""
         body = {
             "model": model or self.model,
-            "max_tokens": 4000,
-            "system": TRANSLATE_PROMPT.format(target=target),
-            "messages": [{"role": "user", "content": html}],
+            "max_output_tokens": 4000,
+            "reasoning": {"effort": "none"},
+            "store": False,
+            "instructions": TRANSLATE_PROMPT.format(target=target),
+            "input": [{"role": "user", "content": html}],
         }
         try:
             # Отдельный таймаут: рассылку нельзя подвешивать надолго,
             # без перевода она всё равно уйдёт — в оригинале.
             r = await self._client.post(API_URL, json=body, timeout=45.0)
             r.raise_for_status()
-            data = r.json()
+            translated = _output_text(r.json())
         except Exception as e:  # noqa: BLE001
             log.warning("перевод не удался: %s", e)
             return None
-        # Упёрлись в max_tokens — перевод оборван на полуслове. Такой
-        # уходить не должен: лучше оригинал целиком, чем английский
-        # без конца.
-        if data.get("stop_reason") == "max_tokens":
-            log.warning("перевод оборван по длине, уйдёт оригинал")
-            return None
-        try:
-            return data["content"][0]["text"].strip()
-        except (KeyError, IndexError, TypeError) as e:
-            log.warning("перевод не удался: %s", e)
-            return None
+        # В том числе incomplete/max_output_tokens: оборванный перевод
+        # не отправляем, рассылка уйдёт в оригинале целиком.
+        if translated is None:
+            log.warning("перевод не удался: нет полного текстового ответа")
+        return translated
 
     async def classify(self, text: str, chat_title: str = "",
                        author: str = "", context: list[str] | None = None
@@ -159,27 +170,33 @@ class Classifier:
 
         body = {
             "model": self.model,
-            "max_tokens": 500,
-            "system": [{
-                "type": "text",
-                "text": load_prompt(),
-                # Промпт длинный и одинаковый — кэшируем, чтобы платить меньше.
-                "cache_control": {"type": "ephemeral"},
-            }],
-            "messages": [{"role": "user", "content": user_block}],
+            "max_output_tokens": 500,
+            # Короткая классификация без расхода лимита на reasoning.
+            "reasoning": {"effort": "none"},
+            "store": False,
+            # Правила и их кэш по mtime остаются прежними. Кэширование
+            # общего префикса на стороне OpenAI происходит автоматически.
+            "instructions": load_prompt(),
+            "input": [{"role": "user", "content": user_block}],
+            "text": {"format": {
+                "type": "json_schema", "name": "fixation",
+                "strict": True, "schema": FIXATION_SCHEMA,
+            }},
         }
 
         try:
             r = await self._client.post(API_URL, json=body)
             r.raise_for_status()
-            raw = r.json()["content"][0]["text"]
+            raw = _output_text(r.json())
         except Exception as e:  # noqa: BLE001
-            log.warning("Claude API недоступен: %s", e)
+            log.warning("OpenAI API недоступен: %s", e)
             return Fixation.no(f"ошибка API: {e}")
 
-        data = _parse_json(raw)
-        if data is None:
-            log.warning("Не удалось разобрать ответ модели: %r", raw[:200])
+        data = _parse_json(raw) if raw is not None else None
+        if not _valid_fixation(data):
+            # Ответ может содержать телефон и имя клиента — в лог его
+            # не пишем даже при ошибке разбора.
+            log.warning("Не удалось разобрать полный ответ модели")
             return Fixation.no("нераспознанный ответ модели")
 
         f = Fixation(
@@ -236,16 +253,53 @@ TRANSLATE_PROMPT = """Ты переводишь рассылки для аген
 в markdown."""
 
 
+def _output_text(data: dict) -> str | None:
+    """Только полный текст Responses API; refusal и обрыв не используем.
+
+    output[0] может быть reasoning, поэтому ищем текст по типу блока.
+    """
+    if not isinstance(data, dict) or data.get("status") != "completed":
+        return None
+    chunks = []
+    for item in data.get("output", []):
+        if item.get("type") != "message":
+            continue
+        if item.get("status", "completed") != "completed":
+            return None
+        for part in item.get("content", []):
+            if part.get("type") == "refusal":
+                return None
+            if part.get("type") == "output_text":
+                text = part.get("text")
+                if not isinstance(text, str):
+                    return None
+                chunks.append(text)
+    return "".join(chunks).strip() or None
+
+
+def _valid_fixation(data: dict | None) -> bool:
+    if not isinstance(data, dict) or not isinstance(data.get("is_fixation"), bool):
+        return False
+    confidence = data.get("confidence")
+    if confidence is not None and (
+        type(confidence) not in (int, float) or not 0 <= confidence <= 1
+    ):
+        return False
+    return all(data.get(name) is None or isinstance(data[name], str)
+               for name in ("client_name", "phone", "agency", "object", "comment", "reason"))
+
+
 def _parse_json(raw: str) -> dict | None:
     raw = raw.strip()
     raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
     try:
-        return json.loads(raw)
+        data = json.loads(raw)
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if not m:
             return None
         try:
-            return json.loads(m.group(0))
+            data = json.loads(m.group(0))
         except json.JSONDecodeError:
             return None
+    return data if isinstance(data, dict) else None

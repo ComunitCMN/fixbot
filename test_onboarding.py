@@ -153,13 +153,13 @@ def test_render_env_contains_everything():
         developer="Ромашка", bot_token="123:ABC", subdomain="romashka",
         amo_token="eyJ0", operator_ids={1, 2}, owner_ids={42},
         db_path="/opt/fixbot/clients/romashka/fixbot.db",
-        inherited={"ANTHROPIC_API_KEY": "sk-ant-x", "DEFAULT_LANG": "ru"},
+        inherited={"OPENAI_API_KEY": "sk-openai-x", "DEFAULT_LANG": "ru"},
         stamp="01.09.2026")
 
     for part in ('TELEGRAM_TOKEN="123:ABC"', 'AMO_SUBDOMAIN="romashka"',
                  'AMO_LONG_TOKEN="eyJ0"', 'DEVELOPER_NAME="Ромашка"',
                  "OPERATOR_IDS=1,2", "OWNER_IDS=42",
-                 'ANTHROPIC_API_KEY="sk-ant-x"', 'DEFAULT_LANG="ru"'):
+                 'OPENAI_API_KEY="sk-openai-x"', 'DEFAULT_LANG="ru"'):
         assert part in text
 
 
@@ -199,7 +199,7 @@ def test_new_client_starts_working_right_away():
 
 def test_collect_inherited_takes_only_shared():
     env = {
-        "ANTHROPIC_API_KEY": "sk-ant-x",
+        "OPENAI_API_KEY": "sk-openai-x",
         "DEFAULT_LANG": "en",
         "TELEGRAM_TOKEN": "чужой ключ",      # у каждого клиента свой
         "AMO_LONG_TOKEN": "чужой токен",
@@ -207,7 +207,7 @@ def test_collect_inherited_takes_only_shared():
         "RANDOM_VAR": "мусор",
     }
     got = pv.collect_inherited(env)
-    assert got == {"ANTHROPIC_API_KEY": "sk-ant-x", "DEFAULT_LANG": "en"}
+    assert got == {"OPENAI_API_KEY": "sk-openai-x", "DEFAULT_LANG": "en"}
 
 
 def test_collect_inherited_skips_empty():
@@ -298,7 +298,7 @@ def test_client_bot_ignores_operator_env(tmp_path):
     work = tmp_path / "code"
     work.mkdir()
     (work / ".env").write_text(
-        'TELEGRAM_TOKEN="оператор"\nANTHROPIC_API_KEY="k"\n'
+        'TELEGRAM_TOKEN="оператор"\nOPENAI_API_KEY="k"\n'
         'AMO_SUBDOMAIN="operator"\nAMO_LONG_TOKEN="t"\n'
         'CLIENTS_DIR="/чужая/папка"\nDEVELOPER_NAME="Оператор"\n',
         encoding="utf-8")
@@ -306,12 +306,12 @@ def test_client_bot_ignores_operator_env(tmp_path):
     client = tmp_path / "client"
     client.mkdir()
     (client / ".env").write_text(
-        'TELEGRAM_TOKEN="клиент"\nANTHROPIC_API_KEY="k"\n'
+        'TELEGRAM_TOKEN="клиент"\nOPENAI_API_KEY="k"\n'
         'AMO_SUBDOMAIN="client"\nAMO_LONG_TOKEN="t"\n'
         'DEVELOPER_NAME="Eco Invest Group"\n', encoding="utf-8")
 
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("TELEGRAM_", "AMO_", "ANTHROPIC_",
+           if not k.startswith(("TELEGRAM_", "AMO_", "ANTHROPIC_", "OPENAI_",
                                 "CLIENTS_", "DEVELOPER_", "DB_", "OPERATOR_"))}
     env["PYTHONPATH"] = str(REPO)
     env["ENV_FILE"] = str(client / ".env")

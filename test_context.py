@@ -30,7 +30,8 @@ def test_context_block_included_in_prompt(monkeypatch):
             return None
 
         def json(self):
-            return {"content": [{"text": '{"is_fixation": false}'}]}
+            return {"status": "completed", "output": [{"type": "message",
+                    "content": [{"type": "output_text", "text": '{"is_fixation": false}'}]}]}
 
     class FakeClient:
         async def post(self, url, json=None):
@@ -48,7 +49,7 @@ def test_context_block_included_in_prompt(monkeypatch):
                              author="Иван",
                              context=["+7 987 564 34 88"]))
 
-    text = captured["body"]["messages"][0]["content"]
+    text = captured["body"]["input"][0]["content"]
     assert "<context>" in text
     assert "+7 987 564 34 88" in text
     assert "зафиксируйте плиз" in text
@@ -66,7 +67,8 @@ def test_no_context_no_block(monkeypatch):
             return None
 
         def json(self):
-            return {"content": [{"text": '{"is_fixation": false}'}]}
+            return {"status": "completed", "output": [{"type": "message",
+                    "content": [{"type": "output_text", "text": '{"is_fixation": false}'}]}]}
 
     class FakeClient:
         async def post(self, url, json=None):
@@ -82,7 +84,7 @@ def test_no_context_no_block(monkeypatch):
     import asyncio
     asyncio.run(clf.classify("фиксирую клиента +79875643488"))
 
-    assert "<context>" not in captured["body"]["messages"][0]["content"]
+    assert "<context>" not in captured["body"]["input"][0]["content"]
 
 
 def test_recent_buffer_keeps_last_and_expires():

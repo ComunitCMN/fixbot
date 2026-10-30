@@ -384,7 +384,7 @@ class _FakeResponse:
 @pytest.mark.asyncio
 async def test_translation_stopped_by_the_length_limit_is_not_used(monkeypatch):
     """
-    Модель упёрлась в max_tokens — перевод оборван. Лучше отправить
+    Модель упёрлась в max_output_tokens — перевод оборван. Лучше отправить
     оригинал целиком, чем английский без конца.
     """
     import llm
@@ -392,8 +392,10 @@ async def test_translation_stopped_by_the_length_limit_is_not_used(monkeypatch):
     clf = llm.Classifier("test-key")
 
     async def fake_post(url, json=None, timeout=None):
-        return _FakeResponse({"stop_reason": "max_tokens",
-                              "content": [{"type": "text", "text": "Unit off"}]})
+        return _FakeResponse({"status": "incomplete",
+                              "incomplete_details": {"reason": "max_output_tokens"},
+                              "output": [{"type": "message", "content": [
+                                  {"type": "output_text", "text": "Unit off"}]}]})
 
     monkeypatch.setattr(clf._client, "post", fake_post)
     try:
@@ -409,8 +411,9 @@ async def test_complete_translation_is_used(monkeypatch):
     clf = llm.Classifier("test-key")
 
     async def fake_post(url, json=None, timeout=None):
-        return _FakeResponse({"stop_reason": "end_turn",
-                              "content": [{"type": "text", "text": "Unit offer"}]})
+        return _FakeResponse({"status": "completed", "output": [
+            {"type": "message", "content": [
+                {"type": "output_text", "text": "Unit offer"}]}]})
 
     monkeypatch.setattr(clf._client, "post", fake_post)
     try:

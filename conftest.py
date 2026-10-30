@@ -24,7 +24,7 @@ _STUBS = {
     # Только латиница: значения уходят в заголовки запросов, а те
     # кириллицу не принимают — падало бы на кодировке, а не по делу.
     "TELEGRAM_TOKEN": "1:test",
-    "ANTHROPIC_API_KEY": "sk-ant-test",
+    "OPENAI_API_KEY": "sk-test-openai",
     "AMO_SUBDOMAIN": "test",
     "AMO_LONG_TOKEN": "test",
     "OPERATOR_IDS": "1",

@@ -3,7 +3,7 @@ FixBot — фиксация клиентов из Telegram в amoCRM.
 
 Порядок обработки сообщения из группы:
 
-    предфильтр → Claude решает, фиксация ли это
+    предфильтр → OpenAI решает, фиксация ли это
                  ↓
     номер клиента (может быть маскированным)
                  ↓
@@ -73,7 +73,7 @@ db = Db(cfg.db_path)
 db.upsert_account(cfg.amo_subdomain, cfg.amo_auth,
                   access_token=cfg.amo_token or None)
 amo = AmoClient(build_auth(cfg, db))
-clf = Classifier(cfg.anthropic_key, cfg.model, cfg.min_confidence)
+clf = Classifier(cfg.openai_key, cfg.model, cfg.min_confidence)
 
 
 # ==========================================================================

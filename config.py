@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
+from llm import DEFAULT_MODEL
+
 #: Какой файл настроек читать.
 #:
 #: По умолчанию python-dotenv ищет `.env` от текущей папки и вверх. Для
@@ -30,10 +32,29 @@ def _ids(name: str) -> set[int]:
     }
 
 
+def _openai_key() -> str:
+    key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not key:
+        raise ValueError("Укажите OPENAI_API_KEY в .env этого бота; ключ Anthropic не подходит")
+    return key
+
+
+def _model() -> str:
+    # Новая настройка приоритетна. Старый MODEL сохраняем для OpenAI,
+    # а оставшийся после обновления claude-* заменяем новым умолчанием.
+    explicit = os.getenv("OPENAI_MODEL", "").strip()
+    legacy = os.getenv("MODEL", "").strip()
+    if explicit:
+        return explicit
+    if legacy and not legacy.startswith("claude-"):
+        return legacy
+    return DEFAULT_MODEL
+
+
 @dataclass
 class Config:
     telegram_token: str = field(default_factory=lambda: os.environ["TELEGRAM_TOKEN"])
-    anthropic_key: str = field(default_factory=lambda: os.environ["ANTHROPIC_API_KEY"])
+    openai_key: str = field(default_factory=_openai_key)
 
     # --- amoCRM ---
     amo_subdomain: str = field(default_factory=lambda: os.environ["AMO_SUBDOMAIN"])
@@ -44,8 +65,8 @@ class Config:
     amo_client_secret: str = os.getenv("AMO_CLIENT_SECRET", "").strip()
     amo_redirect_uri: str = os.getenv("AMO_REDIRECT_URI", "").strip()
 
-    # --- Claude ---
-    model: str = os.getenv("MODEL", "claude-haiku-4-5-20251001")
+    # --- OpenAI ---
+    model: str = field(default_factory=_model)
     #: Порог низкий намеренно: запись в CRM всё равно требует подтверждения
     #: кнопкой, поэтому лишний вопрос дешевле пропущенной фиксации.
     min_confidence: float = float(os.getenv("MIN_CONFIDENCE", "0.3"))
